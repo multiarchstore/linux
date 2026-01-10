@@ -132,6 +132,9 @@ struct uncached_list {
 	spinlock_t		lock;
 	struct list_head	head;
 	struct list_head	quarantine;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 static DEFINE_PER_CPU_ALIGNED(struct uncached_list, rt6_uncached_list);

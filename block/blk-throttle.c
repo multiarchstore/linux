@@ -331,6 +331,10 @@ static void throtl_service_queue_init(struct throtl_service_queue *sq)
 {
 	INIT_LIST_HEAD(&sq->queued[READ]);
 	INIT_LIST_HEAD(&sq->queued[WRITE]);
+	sq->nr_queued_bytes[READ] = 0;
+	sq->nr_queued_bytes[WRITE] = 0;
+	init_waitqueue_head(&sq->wait[READ]);
+	init_waitqueue_head(&sq->wait[WRITE]);
 	sq->pending_tree = RB_ROOT_CACHED;
 	timer_setup(&sq->pending_timer, throtl_pending_timer_fn, 0);
 }
@@ -345,11 +349,14 @@ static struct blkg_policy_data *throtl_pd_alloc(struct gendisk *disk,
 	if (!tg)
 		return NULL;
 
-	if (blkg_rwstat_init(&tg->stat_bytes, gfp))
-		goto err_free_tg;
-
-	if (blkg_rwstat_init(&tg->stat_ios, gfp))
-		goto err_exit_stat_bytes;
+	if (blkg_rwstat_init(&tg->stat_bytes, gfp) ||
+	    blkg_rwstat_init(&tg->stat_ios, gfp) ||
+	    blkg_rwstat_init(&tg->service_time, gfp) ||
+	    blkg_rwstat_init(&tg->wait_time, gfp) ||
+	    blkg_rwstat_init(&tg->completed, gfp) ||
+	    blkg_rwstat_init(&tg->total_bytes_queued, gfp) ||
+	    blkg_rwstat_init(&tg->total_io_queued, gfp))
+		goto err;
 
 	throtl_service_queue_init(&tg->service_queue);
 
@@ -376,9 +383,14 @@ static struct blkg_policy_data *throtl_pd_alloc(struct gendisk *disk,
 
 	return &tg->pd;
 
-err_exit_stat_bytes:
+err:
 	blkg_rwstat_exit(&tg->stat_bytes);
-err_free_tg:
+	blkg_rwstat_exit(&tg->stat_ios);
+	blkg_rwstat_exit(&tg->service_time);
+	blkg_rwstat_exit(&tg->wait_time);
+	blkg_rwstat_exit(&tg->completed);
+	blkg_rwstat_exit(&tg->total_bytes_queued);
+	blkg_rwstat_exit(&tg->total_io_queued);
 	kfree(tg);
 	return NULL;
 }
@@ -405,7 +417,9 @@ static void throtl_pd_init(struct blkg_policy_data *pd)
 	 * regardless of the position of the group in the hierarchy.
 	 */
 	sq->parent_sq = &td->service_queue;
-	if (cgroup_subsys_on_dfl(io_cgrp_subsys) && blkg->parent)
+
+	/* Enable hierarchical throttling even on traditional hierarchy */
+	if (blkg->parent)
 		sq->parent_sq = &blkg_to_tg(blkg->parent)->service_queue;
 	tg->td = td;
 }
@@ -474,6 +488,8 @@ static void throtl_upgrade_state(struct throtl_data *td);
 static void throtl_pd_offline(struct blkg_policy_data *pd)
 {
 	struct throtl_grp *tg = pd_to_tg(pd);
+	struct blkcg_gq *blkg = pd_to_blkg(pd);
+	struct blkcg_gq *parent = blkg->parent;
 
 	tg->bps[READ][LIMIT_LOW] = 0;
 	tg->bps[WRITE][LIMIT_LOW] = 0;
@@ -484,6 +500,18 @@ static void throtl_pd_offline(struct blkg_policy_data *pd)
 
 	if (!tg->td->limit_valid[tg->td->limit_index])
 		throtl_upgrade_state(tg->td);
+	if (parent) {
+		blkg_rwstat_add_aux(&blkg_to_tg(parent)->service_time,
+				    &tg->service_time);
+		blkg_rwstat_add_aux(&blkg_to_tg(parent)->wait_time,
+				    &tg->wait_time);
+		blkg_rwstat_add_aux(&blkg_to_tg(parent)->completed,
+				    &tg->completed);
+		blkg_rwstat_add_aux(&blkg_to_tg(parent)->total_bytes_queued,
+				    &tg->total_bytes_queued);
+		blkg_rwstat_add_aux(&blkg_to_tg(parent)->total_io_queued,
+				    &tg->total_io_queued);
+	}
 }
 
 static void throtl_pd_free(struct blkg_policy_data *pd)
@@ -493,7 +521,23 @@ static void throtl_pd_free(struct blkg_policy_data *pd)
 	del_timer_sync(&tg->service_queue.pending_timer);
 	blkg_rwstat_exit(&tg->stat_bytes);
 	blkg_rwstat_exit(&tg->stat_ios);
+	blkg_rwstat_exit(&tg->service_time);
+	blkg_rwstat_exit(&tg->wait_time);
+	blkg_rwstat_exit(&tg->completed);
+	blkg_rwstat_exit(&tg->total_bytes_queued);
+	blkg_rwstat_exit(&tg->total_io_queued);
 	kfree(tg);
+}
+
+static void throtl_pd_reset(struct blkg_policy_data *pd)
+{
+	struct throtl_grp *tg = pd_to_tg(pd);
+
+	blkg_rwstat_reset(&tg->service_time);
+	blkg_rwstat_reset(&tg->wait_time);
+	blkg_rwstat_reset(&tg->completed);
+	blkg_rwstat_reset(&tg->total_bytes_queued);
+	blkg_rwstat_reset(&tg->total_io_queued);
 }
 
 static struct throtl_grp *
@@ -958,6 +1002,65 @@ static bool tg_may_dispatch(struct throtl_grp *tg, struct bio *bio,
 	return false;
 }
 
+static void throtl_stats_update_completion(struct throtl_grp *tg,
+					   uint64_t start_time,
+					   uint64_t io_start_time,
+					   int op)
+{
+	unsigned long flags;
+	uint64_t now = sched_clock();
+
+	local_irq_save(flags);
+	if (time_after64(now, io_start_time))
+		blkg_rwstat_add(&tg->service_time, op, now - io_start_time);
+	if (time_after64(io_start_time, start_time))
+		blkg_rwstat_add(&tg->wait_time, op, io_start_time - start_time);
+	blkg_rwstat_add(&tg->completed, op, 1);
+	local_irq_restore(flags);
+}
+
+static void throtl_bio_end_io(struct bio *bio)
+{
+	struct throtl_grp *tg;
+
+	rcu_read_lock();
+	/* see comments in throtl_bio_stats_start() */
+	if (!bio_ext_flagged(bio, BIO_THROTL_STATED))
+		goto out;
+
+	tg = (struct throtl_grp *)bio->bi_tg_private;
+	if (!tg)
+		goto out;
+
+	throtl_stats_update_completion(tg, bio_start_time_ns(bio),
+				       bio_io_start_time_ns(bio),
+				       bio_op(bio));
+	blkg_put(tg_to_blkg(tg));
+	bio_clear_ext_flag(bio, BIO_THROTL_STATED);
+out:
+	rcu_read_unlock();
+}
+
+static inline void throtl_bio_stats_start(struct bio *bio, struct throtl_grp *tg)
+{
+	int op = bio_op(bio);
+
+	/*
+	 * It may happen that end_io will be called twice like dm-thin,
+	 * which will save origin end_io first, and call its overwrite
+	 * end_io and then the saved end_io. We use bio flag
+	 * BIO_THROTL_STATED to do only once statistics.
+	 */
+	if ((op == REQ_OP_READ || op == REQ_OP_WRITE) &&
+	    !bio_ext_flagged(bio, BIO_THROTL_STATED)) {
+		blkg_get(tg_to_blkg(tg));
+		bio_set_ext_flag(bio, BIO_THROTL_STATED);
+		bio->bi_tg_end_io = throtl_bio_end_io;
+		bio->bi_tg_private = tg;
+		bio_set_start_time_ns(bio);
+	}
+}
+
 static void throtl_charge_bio(struct throtl_grp *tg, struct bio *bio)
 {
 	bool rw = bio_data_dir(bio);
@@ -1003,6 +1106,10 @@ static void throtl_add_bio_tg(struct bio *bio, struct throtl_qnode *qn,
 	throtl_qnode_add_bio(bio, qn, &sq->queued[rw]);
 
 	sq->nr_queued[rw]++;
+	sq->nr_queued_bytes[rw] += throtl_bio_data_size(bio);
+	blkg_rwstat_add(&tg->total_bytes_queued, bio_op(bio),
+			throtl_bio_data_size(bio));
+	blkg_rwstat_add(&tg->total_io_queued, bio_op(bio), 1);
 	throtl_enqueue_tg(tg);
 }
 
@@ -1058,6 +1165,15 @@ static void tg_dispatch_one_bio(struct throtl_grp *tg, bool rw)
 	 */
 	bio = throtl_pop_queued(&sq->queued[rw], &tg_to_put);
 	sq->nr_queued[rw]--;
+	sq->nr_queued_bytes[rw] -= throtl_bio_data_size(bio);
+	WARN_ON_ONCE(sq->nr_queued_bytes[rw] < 0);
+
+	if (wq_has_sleeper(&sq->wait[rw])) {
+		if (sq->nr_queued_bytes[rw] > 0)
+			wake_up(&sq->wait[rw]);
+		else
+			wake_up_all(&sq->wait[rw]);
+	}
 
 	throtl_charge_bio(tg, bio);
 
@@ -1486,6 +1602,31 @@ static struct cftype throtl_legacy_files[] = {
 		.private = offsetof(struct throtl_grp, stat_ios),
 		.seq_show = tg_print_rwstat_recursive,
 	},
+	{
+		.name = "throttle.io_service_time",
+		.private = offsetof(struct throtl_grp, service_time),
+		.seq_show = tg_print_rwstat,
+	},
+	{
+		.name = "throttle.io_wait_time",
+		.private = offsetof(struct throtl_grp, wait_time),
+		.seq_show = tg_print_rwstat,
+	},
+	{
+		.name = "throttle.io_completed",
+		.private = offsetof(struct throtl_grp, completed),
+		.seq_show = tg_print_rwstat,
+	},
+	{
+		.name = "throttle.total_bytes_queued",
+		.private = offsetof(struct throtl_grp, total_bytes_queued),
+		.seq_show = tg_print_rwstat,
+	},
+	{
+		.name = "throttle.total_io_queued",
+		.private = offsetof(struct throtl_grp, total_io_queued),
+		.seq_show = tg_print_rwstat,
+	},
 	{ }	/* terminate */
 };
 
@@ -1552,10 +1693,67 @@ static u64 tg_prfill_limit(struct seq_file *sf, struct blkg_policy_data *pd,
 	return 0;
 }
 
+static u64 tg_prfill_extstat(struct seq_file *sf, struct blkg_policy_data *pd,
+			 int off)
+{
+	struct throtl_grp *tg = pd_to_tg(pd);
+	const char *dname = blkg_dev_name(pd->blkg);
+	char bufs[10][21] = { "0", "0", "0", "0", "0", "0", "0", "0", "0", "0" };
+	struct blkg_rwstat_sample tmp = { };
+
+	if (!dname)
+		return 0;
+
+	/* read/write IOs wait time */
+	blkg_rwstat_read(&tg->wait_time, &tmp);
+	snprintf(bufs[0], sizeof(bufs[0]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_READ]);
+	snprintf(bufs[1], sizeof(bufs[1]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_WRITE]);
+	/* read/write IOs service time */
+	blkg_rwstat_read(&tg->service_time, &tmp);
+	snprintf(bufs[2], sizeof(bufs[2]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_READ]);
+	snprintf(bufs[3], sizeof(bufs[3]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_WRITE]);
+	/* read/write completed IOs */
+	blkg_rwstat_read(&tg->completed, &tmp);
+	snprintf(bufs[4], sizeof(bufs[4]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_READ]);
+	snprintf(bufs[5], sizeof(bufs[5]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_WRITE]);
+	/* read/write queued bytes */
+	blkg_rwstat_read(&tg->total_bytes_queued, &tmp);
+	snprintf(bufs[6], sizeof(bufs[6]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_READ]);
+	snprintf(bufs[7], sizeof(bufs[7]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_WRITE]);
+	/* read/write queued IOs */
+	blkg_rwstat_read(&tg->total_io_queued, &tmp);
+	snprintf(bufs[8], sizeof(bufs[8]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_READ]);
+	snprintf(bufs[9], sizeof(bufs[9]), "%llu",
+		tmp.cnt[BLKG_RWSTAT_WRITE]);
+
+	seq_printf(sf, "%s rwait=%s wwait=%s rserv=%s wserv=%s rcomp=%s wcomp=%s "
+			"rbytesq=%s wbytesq=%s riosq=%s wiosq=%s\n",
+			dname, bufs[0], bufs[1], bufs[2], bufs[3], bufs[4],
+			bufs[5], bufs[6], bufs[7], bufs[8], bufs[9]);
+
+	return 0;
+}
+
 static int tg_print_limit(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), tg_prfill_limit,
 			  &blkcg_policy_throtl, seq_cft(sf)->private, false);
+	return 0;
+}
+
+static int tg_print_extstat(struct seq_file *sf, void *v)
+{
+	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), tg_prfill_extstat,
+			  &blkcg_policy_throtl, 0, false);
 	return 0;
 }
 
@@ -1695,6 +1893,10 @@ static struct cftype throtl_files[] = {
 		.write = tg_set_limit,
 		.private = LIMIT_MAX,
 	},
+	{
+		.name = "extstat",
+		.seq_show = tg_print_extstat,
+	},
 	{ }	/* terminate */
 };
 
@@ -1714,6 +1916,7 @@ struct blkcg_policy blkcg_policy_throtl = {
 	.pd_online_fn		= throtl_pd_online,
 	.pd_offline_fn		= throtl_pd_offline,
 	.pd_free_fn		= throtl_pd_free,
+	.pd_reset_stats_fn	= throtl_pd_reset,
 };
 
 void blk_throtl_cancel_bios(struct gendisk *disk)
@@ -2173,7 +2376,8 @@ static void throtl_upgrade_state(struct throtl_data *td)
 }
 #endif
 
-bool __blk_throtl_bio(struct bio *bio)
+bool __blk_throtl_bio(struct bio *bio, wait_queue_head_t **waitq,
+			 wait_queue_entry_t *wait)
 {
 	struct request_queue *q = bdev_get_queue(bio->bi_bdev);
 	struct blkcg_gq *blkg = bio->bi_blkg;
@@ -2185,6 +2389,8 @@ bool __blk_throtl_bio(struct bio *bio)
 	struct throtl_data *td = tg->td;
 
 	rcu_read_lock();
+
+	throtl_bio_stats_start(bio, tg);
 
 	spin_lock_irq(&q->queue_lock);
 
@@ -2255,6 +2461,18 @@ again:
 	tg->last_low_overflow_time[rw] = jiffies;
 
 	td->nr_queued[rw]++;
+
+	if (rw == WRITE) {
+		u64 bps_limit = tg_bps_limit(tg, rw);
+
+		if (bps_limit != U64_MAX &&
+		    (wq_has_sleeper(&sq->wait[rw]) ||
+		     sq->nr_queued_bytes[rw] > div_u64(bps_limit, 2))) {
+			*waitq = &sq->wait[rw];
+			prepare_to_wait_exclusive(*waitq, wait, TASK_UNINTERRUPTIBLE);
+		}
+	}
+
 	throtl_add_bio_tg(bio, qn, tg);
 	throttled = true;
 
@@ -2275,6 +2493,8 @@ out_unlock:
 		bio->bi_issue.value |= BIO_ISSUE_THROTL_SKIP_LATENCY;
 #endif
 	spin_unlock_irq(&q->queue_lock);
+	if (!throttled)
+		bio_set_io_start_time_ns(bio);
 
 	rcu_read_unlock();
 	return throttled;

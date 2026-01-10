@@ -22,6 +22,62 @@
 static bool sig_enforce = IS_ENABLED(CONFIG_MODULE_SIG_FORCE);
 module_param(sig_enforce, bool_enable_only, 0644);
 
+static char *sig_enforce_subsys = "";
+module_param(sig_enforce_subsys, charp, 0644);
+MODULE_PARM_DESC(sig_enforce_subsys, "Enforce subsys modules signature check");
+
+enum modules_subsys {
+	MODULE_SUBSYS_GPU,
+	MODULE_SUBSYS_BLOCK,
+	MODULE_SUBSYS_NET,
+};
+
+void set_module_subsys(struct load_info *info, const char *name)
+{
+	char *key_intf_blk = "device_add_disk";
+	char *key_intf_scsi = "scsi_host_alloc";
+	char *key_intf_net = "register_netdev";
+	char *key_intf_gpu = "drm_";
+
+	if (info->subsys)
+		return;
+
+	if (!strncmp(name, key_intf_gpu, strlen(key_intf_gpu)))
+		set_bit(MODULE_SUBSYS_GPU, &info->subsys);
+
+	if (!strncmp(name, key_intf_blk, strlen(key_intf_blk)) ||
+	    !strncmp(name, key_intf_scsi, strlen(key_intf_scsi)))
+		set_bit(MODULE_SUBSYS_BLOCK, &info->subsys);
+
+	/* register_netdev or register_netdevice */
+	if (!strncmp(name, key_intf_net, strlen(key_intf_net)))
+		set_bit(MODULE_SUBSYS_NET, &info->subsys);
+}
+
+int force_subsys_sig_check(struct load_info *info)
+{
+	if (info->sig_ok)
+		return 0;
+
+	if (test_bit(MODULE_SUBSYS_GPU, &info->subsys) &&
+	    parse_option_str(sig_enforce_subsys, "gpu"))
+		goto err;
+
+	if (test_bit(MODULE_SUBSYS_BLOCK, &info->subsys) &&
+	    parse_option_str(sig_enforce_subsys, "block"))
+		goto err;
+
+	if (test_bit(MODULE_SUBSYS_NET, &info->subsys) &&
+	    parse_option_str(sig_enforce_subsys, "net"))
+		goto err;
+
+	return 0;
+err:
+	pr_notice("%s: Loading is rejected, because of wrong signature or key missing!\n",
+		  info->name);
+	return -EKEYREJECTED;
+}
+
 /*
  * Export sig_enforce kernel cmdline parameter to allow other subsystems rely
  * on that instead of directly to CONFIG_MODULE_SIG_FORCE config.

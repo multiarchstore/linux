@@ -49,6 +49,10 @@ struct blkg_iostat_set {
 	int				lqueued;	/* queued in llist */
 	struct blkg_iostat		cur;
 	struct blkg_iostat		last;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
 };
 
 /* association between a blk cgroup and a request queue */
@@ -88,6 +92,8 @@ struct blkcg_gq {
 	int				last_use;
 
 	struct rcu_head			rcu_head;
+
+	CK_KABI_RESERVE(1)
 };
 
 struct blkcg {
@@ -114,6 +120,11 @@ struct blkcg {
 #ifdef CONFIG_CGROUP_WRITEBACK
 	struct list_head		cgwb_list;
 #endif
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 static inline struct blkcg *css_to_blkcg(struct cgroup_subsys_state *css)
@@ -183,6 +194,9 @@ struct blkcg_policy {
 	blkcg_pol_free_pd_fn		*pd_free_fn;
 	blkcg_pol_reset_pd_stats_fn	*pd_reset_stats_fn;
 	blkcg_pol_stat_pd_fn		*pd_stat_fn;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 extern struct blkcg blkcg_root;

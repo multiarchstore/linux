@@ -128,6 +128,8 @@ void set_dax_nocache(struct dax_device *dax_dev);
 void set_dax_nomc(struct dax_device *dax_dev);
 
 struct writeback_control;
+int bdev_dax_pgoff(struct block_device *bdev, sector_t sector, size_t size,
+		   pgoff_t *pgoff);
 #if defined(CONFIG_BLOCK) && defined(CONFIG_FS_DAX)
 int dax_add_host(struct dax_device *dax_dev, struct gendisk *disk);
 void dax_remove_host(struct gendisk *disk);
@@ -248,6 +250,8 @@ vm_fault_t dax_finish_sync_fault(struct vm_fault *vmf,
 int dax_delete_mapping_entry(struct address_space *mapping, pgoff_t index);
 int dax_invalidate_mapping_entry_sync(struct address_space *mapping,
 				      pgoff_t index);
+int dax_copy_range(struct block_device *bdev, struct dax_device *dax_dev,
+		   u64 src_addr, u64 dst_addr, size_t size);
 int dax_dedupe_file_range_compare(struct inode *src, loff_t srcoff,
 				  struct inode *dest, loff_t destoff,
 				  loff_t len, bool *is_same,

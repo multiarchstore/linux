@@ -322,23 +322,34 @@ static unsigned long dax_end_pfn(void *entry)
 
 static inline bool dax_page_is_shared(struct page *page)
 {
-	return page->mapping == PAGE_MAPPING_DAX_SHARED;
+	return (unsigned long)READ_ONCE(page->mapping) & PAGE_MAPPING_DAX_SHARED;
 }
 
 /*
  * Set the page->mapping with PAGE_MAPPING_DAX_SHARED flag, increase the
  * refcount.
  */
-static inline void dax_page_share_get(struct page *page)
+static inline void dax_page_share_get(struct page *page,
+			struct address_space *mapping, pgoff_t index)
 {
-	if (page->mapping != PAGE_MAPPING_DAX_SHARED) {
+	struct address_space *oldmapping = READ_ONCE(page->mapping);
+
+	if (!((unsigned long)oldmapping & PAGE_MAPPING_DAX_SHARED)) {
 		/*
 		 * Reset the index if the page was already mapped
 		 * regularly before.
 		 */
-		if (page->mapping)
+		if (oldmapping)
 			page->share = 1;
-		page->mapping = PAGE_MAPPING_DAX_SHARED;
+
+		if (test_bit(AS_FSDAX_NORMAP, &mapping->flags)) {
+			/* Note that we (ab)use page->private to keep index for now */
+			WRITE_ONCE(page->private, index);
+			/* paired with smp_mb() in xfs_dax_notify_ddev_failure2() */
+			smp_mb();
+		}
+		WRITE_ONCE(page->mapping,
+			   (void *)((unsigned long)mapping | PAGE_MAPPING_DAX_SHARED));
 	}
 	page->share++;
 }
@@ -367,7 +378,7 @@ static void dax_associate_entry(void *entry, struct address_space *mapping,
 		struct page *page = pfn_to_page(pfn);
 
 		if (shared) {
-			dax_page_share_get(page);
+			dax_page_share_get(page, mapping, index);
 		} else {
 			WARN_ON_ONCE(page->mapping);
 			page->mapping = mapping;
@@ -1062,6 +1073,46 @@ int dax_writeback_mapping_range(struct address_space *mapping,
 	return ret;
 }
 EXPORT_SYMBOL_GPL(dax_writeback_mapping_range);
+
+int dax_copy_range(struct block_device *bdev, struct dax_device *dax_dev,
+		   u64 src_addr, u64 dst_addr, size_t size)
+{
+	const sector_t src_sector = src_addr >> SECTOR_SHIFT;
+	const sector_t dst_sector = dst_addr >> SECTOR_SHIFT;
+	pgoff_t spgoff, dpgoff;
+	int id, rc;
+	long length;
+	void *saddr, *daddr;
+
+	rc = bdev_dax_pgoff(bdev, src_sector, size, &spgoff);
+	if (rc)
+		return rc;
+
+	rc = bdev_dax_pgoff(bdev, dst_sector, size, &dpgoff);
+	if (rc)
+		return rc;
+
+	id = dax_read_lock();
+	length = dax_direct_access(dax_dev, spgoff, PHYS_PFN(size), DAX_ACCESS,
+				   &saddr, NULL);
+	if (length < 0) {
+		rc = length;
+		goto out;
+	}
+
+	length = dax_direct_access(dax_dev, dpgoff, PHYS_PFN(size), DAX_ACCESS,
+				   &daddr, NULL);
+	if (length < 0) {
+		rc = length;
+		goto out;
+	}
+
+	rc = copy_mc_to_kernel(daddr, saddr, size);
+out:
+	dax_read_unlock(id);
+	return rc;
+}
+EXPORT_SYMBOL_GPL(dax_copy_range);
 
 static int dax_iomap_direct_access(const struct iomap *iomap, loff_t pos,
 		size_t size, void **kaddr, pfn_t *pfnp)

@@ -13,7 +13,7 @@
 /*
  * Defines x86 CPU feature bits
  */
-#define NCAPINTS			22	   /* N 32-bit words worth of info */
+#define NCAPINTS			24	   /* N 32-bit words worth of info */
 #define NBUGINTS			2	   /* N 32-bit bug flags */
 
 /*
@@ -81,10 +81,8 @@
 #define X86_FEATURE_K6_MTRR		( 3*32+ 1) /* AMD K6 nonstandard MTRRs */
 #define X86_FEATURE_CYRIX_ARR		( 3*32+ 2) /* Cyrix ARRs (= MTRRs) */
 #define X86_FEATURE_CENTAUR_MCR		( 3*32+ 3) /* Centaur MCRs (= MTRRs) */
-
-/* CPU types for specific tunings: */
 #define X86_FEATURE_K8			( 3*32+ 4) /* "" Opteron, Athlon64 */
-/* FREE, was #define X86_FEATURE_K7			( 3*32+ 5) "" Athlon */
+#define X86_FEATURE_ZEN5		( 3*32+ 5) /* "" CPU based on Zen5 microarchitecture */
 #define X86_FEATURE_P3			( 3*32+ 6) /* "" P3 */
 #define X86_FEATURE_P4			( 3*32+ 7) /* "" P4 */
 #define X86_FEATURE_CONSTANT_TSC	( 3*32+ 8) /* TSC ticks at a constant rate */
@@ -146,8 +144,12 @@
 #define X86_FEATURE_HYPERVISOR		( 4*32+31) /* Running on a hypervisor */
 
 /* VIA/Cyrix/Centaur-defined CPU features, CPUID level 0xC0000001, word 5 */
+#define X86_FEATURE_SM2		(5*32 + 0) /* SM2 ZhaoXin GMI present */
+#define X86_FEATURE_SM2_EN		(5*32 + 1) /* SM2 ZhaoXin GMI enabled */
 #define X86_FEATURE_XSTORE		( 5*32+ 2) /* "rng" RNG present (xstore) */
 #define X86_FEATURE_XSTORE_EN		( 5*32+ 3) /* "rng_en" RNG enabled */
+#define X86_FEATURE_CCS			(5*32 + 4) /* "sm3/4" SM3/4 present */
+#define X86_FEATURE_CCS_EN		(5*32 + 5) /* "sm3/4" SM3/4 enabled */
 #define X86_FEATURE_XCRYPT		( 5*32+ 6) /* "ace" on-CPU crypto (xcrypt) */
 #define X86_FEATURE_XCRYPT_EN		( 5*32+ 7) /* "ace_en" on-CPU crypto enabled */
 #define X86_FEATURE_ACE2		( 5*32+ 8) /* Advanced Cryptography Engine v2 */
@@ -156,6 +158,23 @@
 #define X86_FEATURE_PHE_EN		( 5*32+11) /* PHE enabled */
 #define X86_FEATURE_PMM			( 5*32+12) /* PadLock Montgomery Multiplier */
 #define X86_FEATURE_PMM_EN		( 5*32+13) /* PMM enabled */
+#define X86_FEATURE_ZX_FMA		(5*32+15) /* FMA supported */
+#define X86_FEATURE_PARALLAX	(5*32+16) /* Adaptive P-state control present */
+#define X86_FEATURE_PARALLAX_EN (5*32+17) /* Adaptive P-state control enabled */
+#define X86_FEATURE_OVERSTRESS	(5*32+18) /* Overstress Feature for auto overclock present */
+#define X86_FEATURE_OVERSTRESS_EN (5*32+19) /* Overstress Feature for auto overclock enabled */
+#define X86_FEATURE_TM3        (5*32+20) /* Thermal Monitor 3 present */
+#define X86_FEATURE_TM3_EN		(5*32+21) /* Thermal Monitor 3 enabled */
+#define X86_FEATURE_RNG2		(5*32+22) /* 2nd generation of RNG present */
+#define X86_FEATURE_RNG2_EN    (5*32+23) /* 2nd generation of RNG enabled */
+#define X86_FEATURE_SEM        (5*32+24) /* SME feature present */
+#define X86_FEATURE_PHE2		(5*32+25) /* SHA384 and SHA 512 present */
+#define X86_FEATURE_PHE2_EN    (5*32+26) /* SHA384 and SHA 512 enabled */
+#define X86_FEATURE_XMODX      (5*32+27) /* "rsa" XMODEXP and MONTMUL2 are present */
+#define X86_FEATURE_XMODX_EN   (5*32+28) /* "rsa_en" XMODEXP and MONTMUL2 are enabled */
+#define X86_FEATURE_VEX        (5*32+29) /* VEX instructions are present */
+#define X86_FEATURE_VEX_EN		(5*32+30) /* VEX instructions are enabled */
+#define X86_FEATURE_STK        (5*32+31) /* STK are present */
 
 /* More extended AMD flags: CPUID level 0x80000001, ECX, word 6 */
 #define X86_FEATURE_LAHF_LM		( 6*32+ 0) /* LAHF/SAHF in long mode */
@@ -329,6 +348,7 @@
 #define X86_FEATURE_AMX_FP16		(12*32+21) /* "" AMX fp16 Support */
 #define X86_FEATURE_AVX_IFMA            (12*32+23) /* "" Support for VPMADD52[H,L]UQ */
 #define X86_FEATURE_LAM			(12*32+26) /* Linear Address Masking */
+#define X86_FEATURE_CRC32C_LOW_PERF	(12*32+27) /* "" Low performance */
 
 /* AMD-defined CPU features, CPUID level 0x80000008 (EBX), word 13 */
 #define X86_FEATURE_CLZERO		(13*32+ 0) /* CLZERO instruction */
@@ -444,6 +464,8 @@
 #define X86_FEATURE_V_TSC_AUX		(19*32+ 9) /* "" Virtual TSC_AUX */
 #define X86_FEATURE_SME_COHERENT	(19*32+10) /* "" AMD hardware-enforced cache coherency */
 #define X86_FEATURE_DEBUG_SWAP		(19*32+14) /* AMD SEV-ES full debug state swap support */
+/* HYGON 3rd CSV */
+#define X86_FEATURE_CSV3		(19*32 + 30) /* HYGON 3rd CSV */
 
 /* AMD-defined Extended Feature 2 EAX, CPUID level 0x80000021 (EAX), word 20 */
 #define X86_FEATURE_NO_NESTED_DATA_BP	(20*32+ 0) /* "" No Nested Data Breakpoints */
@@ -455,6 +477,13 @@
 #define X86_FEATURE_SBPB		(20*32+27) /* "" Selective Branch Prediction Barrier */
 #define X86_FEATURE_IBPB_BRTYPE		(20*32+28) /* "" MSR_PRED_CMD[IBPB] flushes all branch type predictions */
 #define X86_FEATURE_SRSO_NO		(20*32+29) /* "" CPU is not affected by SRSO */
+
+/* HYGON-defined CPU features, CPUID level 0x8c860000:0 (EDX), word 22 */
+#define X86_FEATURE_SM3			(22*32 + 1) /* SM3 instructions */
+#define X86_FEATURE_SM4			(22*32 + 2) /* SM4 instructions */
+
+/* VIA/Cyrix/Centaur-defined CPU features, CPUID level 0xC0000006, word 23 */
+#define X86_FEATURE_ZXPAUSE		(23*32 + 0) /* ZHAOXIN ZXPAUSE */
 
 /*
  * Extended auxiliary flags: Linux defined - for features scattered in various

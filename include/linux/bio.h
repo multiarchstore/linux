@@ -9,8 +9,17 @@
 /* struct bio, bio_vec and BIO_* flags are defined in blk_types.h */
 #include <linux/blk_types.h>
 #include <linux/uio.h>
+#include <linux/ck_kabi.h>
 
+#ifdef CONFIG_THP_SWAP
+#if HPAGE_PMD_NR > 256
+#define BIO_MAX_VECS		(HPAGE_PMD_NR * 1U)
+#else
 #define BIO_MAX_VECS		256U
+#endif
+#else
+#define BIO_MAX_VECS		256U
+#endif
 
 struct queue_limits;
 
@@ -242,6 +251,21 @@ static inline void bio_clear_flag(struct bio *bio, unsigned int bit)
 	bio->bi_flags &= ~(1U << bit);
 }
 
+static inline bool bio_ext_flagged(struct bio *bio, unsigned int bit)
+{
+	return (bio->bi_ext_flags & (1U << bit)) != 0;
+}
+
+static inline void bio_set_ext_flag(struct bio *bio, unsigned int bit)
+{
+	bio->bi_ext_flags |= (1U << bit);
+}
+
+static inline void bio_clear_ext_flag(struct bio *bio, unsigned int bit)
+{
+	bio->bi_ext_flags &= ~(1U << bit);
+}
+
 static inline struct bio_vec *bio_first_bvec_all(struct bio *bio)
 {
 	WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED));
@@ -346,6 +370,10 @@ struct bio_integrity_payload {
 	struct work_struct	bip_work;	/* I/O completion */
 
 	struct bio_vec		*bip_vec;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+
 	struct bio_vec		bip_inline_vecs[];/* embedded bvec array */
 };
 
@@ -705,6 +733,11 @@ struct bio_set {
 	 * Hot un-plug notifier for the per-cpu cache, if used
 	 */
 	struct hlist_node cpuhp_dead;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 static inline bool bioset_initialized(struct bio_set *bs)

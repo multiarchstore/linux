@@ -3222,7 +3222,7 @@ slab_alloc_node(struct kmem_cache *cachep, struct list_lru *lru, gfp_t flags,
 	if (unlikely(!cachep))
 		return NULL;
 
-	objp = kfence_alloc(cachep, orig_size, flags);
+	objp = kfence_alloc_node(cachep, orig_size, flags, nodeid);
 	if (unlikely(objp))
 		goto out;
 

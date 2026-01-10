@@ -1880,6 +1880,93 @@ xfs_fs_eofblocks_from_user(
 #define XFS_IOC_ALLOCSP64	_IOW ('X', 36, struct xfs_flock64)
 #define XFS_IOC_FREESP64	_IOW ('X', 37, struct xfs_flock64)
 
+static bool
+xfs_need_wait_reflink_secondary(
+	struct xfs_mount	*mp,
+	struct xfs_inode	*ip)
+{
+	struct xfs_inode *sip;
+
+	mutex_lock(&mp->m_reflink_opt_lock);
+	sip = ip->i_reflink_opt_ip;
+	if (!sip /* pair nolonger valid */ ||
+	    (READ_ONCE(sip->i_flags) & XFS_NEED_INACTIVE) /* retry now */) {
+		mutex_unlock(&mp->m_reflink_opt_lock);
+		return false;
+	}
+	mutex_unlock(&mp->m_reflink_opt_lock);
+	return true;
+}
+
+int
+xfs_wait_reflink_secondary(
+	struct xfs_mount	*mp,
+	struct xfs_inode	*ip,
+	u32			timeout_sec)
+{
+	struct xfs_inode *sip;
+	unsigned long expire = 0;
+
+	if (!(ip->i_reflink_flags & XFS_REFLINK_PRIMARY))
+		return -EINVAL;
+	if (timeout_sec)
+		expire = jiffies + HZ * timeout_sec;
+retry:
+	mutex_lock(&mp->m_reflink_opt_lock);
+	sip = ip->i_reflink_opt_ip;
+	if (!sip) {
+		mutex_unlock(&mp->m_reflink_opt_lock);
+		return 0;
+	}
+	spin_lock(&sip->i_flags_lock);
+	/*
+	 * We need to consider if this inode needs to be inactive
+	 * immediately here.
+	 */
+	/* already inactivating now by others? */
+	if ((sip->i_flags & XFS_INACTIVATING) ||
+		/* the inode isn't reclaimable (active or race). */
+		!(sip->i_flags & (XFS_NEED_INACTIVE | XFS_INACTIVATING))) {
+		spin_unlock(&sip->i_flags_lock);
+		mutex_unlock(&mp->m_reflink_opt_lock);
+		if (fatal_signal_pending(current))
+			return -EINTR;
+		if (timeout_sec) {
+			if (time_after(jiffies, expire))
+				return -ETIMEDOUT;
+			wait_event_killable_timeout(mp->m_reflink_opt_wait,
+				!xfs_need_wait_reflink_secondary(mp, ip),
+				HZ * timeout_sec);
+		} else {
+			wait_event_killable(mp->m_reflink_opt_wait,
+				!xfs_need_wait_reflink_secondary(mp, ip));
+		}
+		goto retry;
+	}
+	spin_unlock(&sip->i_flags_lock);
+
+	/*
+	 * gcwork is already on the list since XFS_NEED_INACTIVE is
+	 * set afterwards, let's try to drop this from gcwork list.
+	 */
+	spin_lock(&mp->m_reflink_opt_gclock);
+	/* if the bg kworker decides to handle instead, list_empty will be hit */
+	if (list_empty(&sip->i_reflink_opt_gclist)) {
+		spin_unlock(&mp->m_reflink_opt_gclock);
+		mutex_unlock(&mp->m_reflink_opt_lock);
+		goto retry;
+	}
+	list_del_init(&sip->i_reflink_opt_gclist);
+	spin_unlock(&mp->m_reflink_opt_gclock);
+	mutex_unlock(&mp->m_reflink_opt_lock);
+
+	/* XFS_NEED_INACTIVE will be stable here. */
+	ASSERT(sip->i_flags & XFS_NEED_INACTIVE);
+	xfs_iflags_set(sip, XFS_INACTIVATING);
+	xfs_inodegc_inactivate(sip);
+	return 0;
+}
+
 /*
  * Note: some of the ioctl's return positive numbers as a
  * byte count indicating success, such as readlink_by_handle.
@@ -2157,6 +2244,48 @@ xfs_file_ioctl(
 		error = xfs_blockgc_free_space(mp, &icw);
 		sb_end_write(mp->m_super);
 		return error;
+	}
+
+	case XFS_IOC_SET_REFLINK_FLAGS: {
+		uint32_t in;
+
+		if (get_user(in, (uint32_t __user *)arg))
+			return -EFAULT;
+
+		/* invalid values */
+		if ((in & ~(XFS_REFLINK_PRIMARY | XFS_REFLINK_SECONDARY)) ||
+		    (in & (XFS_REFLINK_PRIMARY | XFS_REFLINK_SECONDARY)) ==
+			(XFS_REFLINK_PRIMARY | XFS_REFLINK_SECONDARY))
+			return -EINVAL;
+
+		/* clearing all flags is unallowed */
+		if (!in)
+			return -EINVAL;
+
+		xfs_ilock(ip, XFS_ILOCK_EXCL);
+		if (!ip->i_reflink_flags) {
+			ip->i_reflink_flags = in;
+		} else if (ip->i_reflink_flags != in) {
+			xfs_iunlock(ip, XFS_ILOCK_EXCL);
+			return -EINVAL;
+		}
+		xfs_iunlock(ip, XFS_ILOCK_EXCL);
+		return 0;
+	}
+
+	case XFS_IOC_GET_REFLINK_FLAGS: {
+		if (put_user(ip->i_reflink_flags, (uint32_t __user *)arg))
+			return -EFAULT;
+		return 0;
+	}
+
+	case XFS_IOC_WAIT_REFLINK_SECONDARY: {
+		u32 timeout_sec;
+
+		if (get_user(timeout_sec, (uint32_t __user *)arg))
+			return -EFAULT;
+
+		return xfs_wait_reflink_secondary(mp, ip, timeout_sec);
 	}
 
 	default:

@@ -122,9 +122,15 @@ This is tunable via procfs::
 Larger slice values will reduce transfer overheads, while smaller values allow
 for more fine-grained consumption.
 
+Sometimes users might want a group to burst without accumulation. This is
+tunable via::
+       /proc/sys/kernel/sched_cfs_bw_burst_onset_percent (default=0)
+
+Up to 100% runtime of cpu.cfs_burst_us might be given on setting bandwidth.
+
 Statistics
 ----------
-A group's bandwidth statistics are exported via 5 fields in cpu.stat.
+A group's bandwidth statistics are exported via 6 fields in cpu.stat.
 
 cpu.stat:
 
@@ -132,6 +138,7 @@ cpu.stat:
 - nr_throttled: Number of times the group has been throttled/limited.
 - throttled_time: The total time duration (in nanoseconds) for which entities
   of the group have been throttled.
+- current_bw: Current runtime in global pool.
 - nr_bursts: Number of periods burst occurs.
 - burst_time: Cumulative wall-time (in nanoseconds) that any CPUs has used
   above quota in respective periods.

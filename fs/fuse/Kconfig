@@ -52,3 +52,14 @@ config FUSE_DAX
 
 	  If you want to allow mounting a Virtio Filesystem with the "dax"
 	  option, answer Y.
+
+config VIRT_FUSE
+	tristate "FUSE device virtualization extension"
+	depends on FUSE_FS
+	help
+	  This FUSE extension provides virtualized FUSE devices for container
+	  workloads. Each virtualized FUSE device only supports one instance
+	  of FUSE filesystem with special treatments for user namespace.
+
+	  If you want to support FUSE device virtualization for containers,
+	  answer Y or M.

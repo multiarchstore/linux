@@ -18,6 +18,8 @@ struct genl_multicast_group {
 	char			name[GENL_NAMSIZ];
 	u8			flags;
 	u8			cap_sys_admin:1;
+
+	CK_KABI_RESERVE(1)
 };
 
 struct genl_split_ops;
@@ -89,6 +91,8 @@ struct genl_family {
 	int			id;
 	/* starting number of multicast group IDs in this family */
 	unsigned int		mcgrp_offset;
+
+	CK_KABI_RESERVE(1)
 };
 
 /**
@@ -113,6 +117,8 @@ struct genl_info {
 	possible_net_t		_net;
 	void *			user_ptr[2];
 	struct netlink_ext_ack *extack;
+
+	CK_KABI_RESERVE(1)
 };
 
 static inline struct net *genl_info_net(const struct genl_info *info)
@@ -195,6 +201,11 @@ struct genl_ops {
 	u8			internal_flags;
 	u8			flags;
 	u8			validate;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /**

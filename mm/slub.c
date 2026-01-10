@@ -1866,6 +1866,7 @@ static inline struct slab *alloc_slab_page(gfp_t flags, int node,
 	struct slab *slab;
 	unsigned int order = oo_order(oo);
 
+	flags |= __GFP_NOKFENCE;
 	if (node == NUMA_NO_NODE)
 		folio = (struct folio *)alloc_pages(flags, order);
 	else
@@ -3461,7 +3462,7 @@ static __fastpath_inline void *slab_alloc_node(struct kmem_cache *s, struct list
 	if (!s)
 		return NULL;
 
-	object = kfence_alloc(s, orig_size, gfpflags);
+	object = kfence_alloc_node(s, orig_size, gfpflags, node);
 	if (unlikely(object))
 		goto out;
 

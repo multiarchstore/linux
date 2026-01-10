@@ -42,6 +42,7 @@
 #include <asm/sev.h>
 #include <asm/tdx.h>
 #include <asm/init.h>
+#include <asm/csv.h>
 
 /*
  * Manage page tables very early on.
@@ -159,6 +160,14 @@ static unsigned long __head sme_postprocess_startup(struct boot_params *bp, pmdv
 
 			i = pmd_index(vaddr);
 			pmd[i] -= sme_get_me_mask();
+		}
+
+		/* On CSV3, move the shared pages out of isolated memory region. */
+		if (csv3_active()) {
+			vaddr = (unsigned long)__start_bss_decrypted;
+			csv_early_reset_memory(bp);
+			csv_early_update_memory_dec((unsigned long)vaddr,
+						    (vaddr_end - vaddr) >> PAGE_SHIFT);
 		}
 	}
 
@@ -317,6 +326,54 @@ unsigned long __head __startup_64(unsigned long physaddr,
 
 	return sme_postprocess_startup(bp, pmd);
 }
+
+#ifdef CONFIG_AMD_MEM_ENCRYPT
+extern bool bsp_flush_bss_decrypted_section_done;
+
+void __ref early_clflush_bss_decrypted_section(void)
+{
+	/* Only allow bsp flush these caches and the bsp must at early boot stage */
+	if (bsp_flush_bss_decrypted_section_done)
+		return;
+
+	if (read_cr3_pa() != __pa_nodebug(early_top_pgt))
+		return;
+
+	if (sme_get_me_mask()) {
+		unsigned long vaddr, vaddr_end;
+		char *cl, *start, *end;
+
+		/*
+		 * The memory region of .bss..decrypted section maybe mapped
+		 * with encryption in earlier stage. If the correspond stale
+		 * caches lives in earlier stage were not flushed before we
+		 * access that memory region, then Linux will crash later
+		 * because the stale caches will pollute the memory. So we
+		 * need flush the caches with encrypted mapping before we
+		 * access .bss..decrypted section.
+		 *
+		 * The function __startup_64() have already filled the
+		 * encrypted mapping for .bss..decrypted section, use that
+		 * mapping here.
+		 */
+		vaddr = (unsigned long)__start_bss_decrypted -
+					__START_KERNEL_map + phys_base;
+		vaddr_end = (unsigned long)__end_bss_decrypted -
+					__START_KERNEL_map + phys_base;
+
+		/* Hardcode cl-size to 64 at this stage. */
+		start = (char *)(vaddr & ~63);
+		end   = (char *)((vaddr_end + 63) & ~63);
+
+		asm volatile("mfence" : : : "memory");
+		for (cl = start; cl != end; cl += 64)
+			clflush(cl);
+		asm volatile("mfence" : : : "memory");
+	}
+
+	bsp_flush_bss_decrypted_section_done = true;
+}
+#endif
 
 /* Wipe all early page tables except for the kernel symbol map */
 static void __init reset_early_page_tables(void)

@@ -758,6 +758,8 @@ struct drm_plane {
 	 * scaling.
 	 */
 	struct drm_property *scaling_filter_property;
+
+	CK_KABI_RESERVE(1)
 };
 
 #define obj_to_plane(x) container_of(x, struct drm_plane, base)

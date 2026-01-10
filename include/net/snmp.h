@@ -91,6 +91,8 @@ struct icmpv6msg_mib_device {
 #define TCP_MIB_MAX	__TCP_MIB_MAX
 struct tcp_mib {
 	unsigned long	mibs[TCP_MIB_MAX];
+
+	CK_KABI_RESERVE(1)
 };
 
 /* UDP */

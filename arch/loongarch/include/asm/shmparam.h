@@ -6,7 +6,6 @@
 #define _ASM_SHMPARAM_H
 
 #define __ARCH_FORCE_SHMLBA	1
-
-#define	SHMLBA	SZ_64K		 /* attach addr a multiple of this */
+#include <asm-generic/shmparam.h>
 
 #endif /* _ASM_SHMPARAM_H */

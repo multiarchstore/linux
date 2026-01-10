@@ -48,6 +48,8 @@
 #include <asm/sections.h>
 #include <asm/setup.h>
 #include <asm/time.h>
+#include <asm/unwind.h>
+#include "legacy_boot.h"
 
 #define SMBIOS_BIOSSIZE_OFFSET		0x09
 #define SMBIOS_BIOSEXTERN_OFFSET	0x13
@@ -130,15 +132,29 @@ static void __init parse_cpu_table(const struct dmi_header *dm)
 
 	loongson_sysconf.cpuname = (void *)dmi_string_parse(dm, dmi_data[16]);
 	loongson_sysconf.cores_per_package = *(dmi_data + SMBIOS_CORE_PACKAGE_OFFSET);
+	__max_packages++;
 
 	pr_info("CpuClock = %llu\n", cpu_clock_freq);
 }
 
 static void __init parse_bios_table(const struct dmi_header *dm)
 {
+	int bios_extern;
 	char *dmi_data = (char *)dm;
 
+	bios_extern = *(dmi_data + SMBIOS_BIOSEXTERN_OFFSET);
 	b_info.bios_size = (*(dmi_data + SMBIOS_BIOSSIZE_OFFSET) + 1) << 6;
+
+	if (bpi_version == BPI_VERSION_V2) {
+		if ((!!(efi_bp->flags & BPI_FLAGS_UEFI_SUPPORTED)) != (!!(bios_extern & LOONGSON_EFI_ENABLE)))
+			pr_err("There is a conflict of definitions between efi_bp->flags and smbios\n");
+		return;
+	}
+
+	if (bios_extern & LOONGSON_EFI_ENABLE)
+		set_bit(EFI_BOOT, &efi.flags);
+	else
+		clear_bit(EFI_BOOT, &efi.flags);
 }
 
 static void __init find_tokens(const struct dmi_header *dm, void *dummy)
@@ -170,12 +186,14 @@ bool wc_enabled = false;
 
 EXPORT_SYMBOL(wc_enabled);
 
+static int wc_arg = -1;
+
 static int __init setup_writecombine(char *p)
 {
 	if (!strcmp(p, "on"))
-		wc_enabled = true;
+		wc_arg = true;
 	else if (!strcmp(p, "off"))
-		wc_enabled = false;
+		wc_arg = false;
 	else
 		pr_warn("Unknown writecombine setting \"%s\".\n", p);
 
@@ -194,6 +212,16 @@ static int __init early_parse_mem(char *p)
 		return -EINVAL;
 	}
 
+	start = 0;
+	size = memparse(p, &p);
+	if (*p == '@')	/* Every mem=... should contain '@' */
+		start = memparse(p + 1, &p);
+	else {		/* Only one mem=... is allowed if no '@' */
+		usermem = 1;
+		memblock_enforce_memory_limit(size);
+		return 0;
+	}
+
 	/*
 	 * If a user specifies memory size, we
 	 * blow away any automatically generated
@@ -203,14 +231,6 @@ static int __init early_parse_mem(char *p)
 		usermem = 1;
 		memblock_remove(memblock_start_of_DRAM(),
 			memblock_end_of_DRAM() - memblock_start_of_DRAM());
-	}
-	start = 0;
-	size = memparse(p, &p);
-	if (*p == '@')
-		start = memparse(p + 1, &p);
-	else {
-		pr_err("Invalid format!\n");
-		return -EINVAL;
 	}
 
 	if (!IS_ENABLED(CONFIG_NUMA))
@@ -357,6 +377,28 @@ out:
 	*cmdline_p = boot_command_line;
 }
 
+static void __init writecombine_detect(void)
+{
+	u64 cpuname;
+
+	if (wc_arg >= 0) {
+		wc_enabled = wc_arg;
+		return;
+	}
+
+	cpuname = iocsr_read64(LOONGARCH_IOCSR_CPUNAME);
+	cpuname &= 0x0000ffffffffffff;
+	switch (cpuname) {
+	case 0x0000303030364333:
+		wc_enabled = false;
+		break;
+	default:
+		break;
+	}
+
+	return;
+}
+
 void __init platform_init(void)
 {
 	arch_reserve_vmcore();
@@ -380,6 +422,8 @@ void __init platform_init(void)
 	smbios_parse();
 	pr_info("The BIOS Version: %s\n", b_info.bios_version);
 
+	writecombine_detect();
+	pr_info("WriteCombine: %s\n", wc_enabled ? "on":"off");
 	efi_runtime_init();
 }
 
@@ -608,6 +652,7 @@ static void __init prefill_possible_map(void)
 void __init setup_arch(char **cmdline_p)
 {
 	cpu_probe();
+	unwind_init();
 
 	init_environ();
 	efi_init();
@@ -616,12 +661,16 @@ void __init setup_arch(char **cmdline_p)
 	pagetable_init();
 	bootcmdline_init(cmdline_p);
 	parse_early_param();
-	reserve_initrd_mem();
+	/* The small fdt method should be skipped directly to avoid two reserved operations. */
+	if (fw_arg2)
+		reserve_initrd_mem();
 
 	platform_init();
 	arch_mem_init(cmdline_p);
 
 	resource_init();
+	jump_label_init(); /* Initialise the static keys for paravirtualization */
+
 #ifdef CONFIG_SMP
 	plat_smp_setup();
 	prefill_possible_map();

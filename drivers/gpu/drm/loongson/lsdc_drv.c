@@ -438,7 +438,6 @@ static const struct dev_pm_ops lsdc_pm_ops = {
 
 static const struct pci_device_id lsdc_pciid_list[] = {
 	{PCI_VDEVICE(LOONGSON, 0x7a06), CHIP_LS7A1000},
-	{PCI_VDEVICE(LOONGSON, 0x7a36), CHIP_LS7A2000},
 	{ }
 };
 

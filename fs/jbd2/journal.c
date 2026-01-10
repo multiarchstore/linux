@@ -191,6 +191,9 @@ loop:
 	if (journal->j_flags & JBD2_UNMOUNT)
 		goto end_loop;
 
+	if (kthread_should_stop())
+		goto end_loop;
+
 	jbd2_debug(1, "commit_sequence=%u, commit_request=%u\n",
 		journal->j_commit_sequence, journal->j_commit_request);
 
@@ -261,9 +264,40 @@ end_loop:
 	return 0;
 }
 
+static int jbd2_checkpoint_thread(void *arg)
+{
+	journal_t *journal = arg;
+	DEFINE_WAIT(wait);
+
+	jbd2_debug(1, "%s\n", __func__);
+	journal->j_checkpoint_task = current;
+
+loop:
+	prepare_to_wait(&journal->j_wait_checkpoint, &wait,
+			TASK_INTERRUPTIBLE);
+	wake_up_all(&journal->j_wait_done_checkpoint);
+	schedule();
+	finish_wait(&journal->j_wait_checkpoint, &wait);
+
+	if (journal->j_flags & JBD2_UNMOUNT)
+		goto end_loop;
+
+	mutex_lock(&journal->j_checkpoint_mutex);
+	jbd2_log_do_checkpoint(journal);
+	mutex_unlock(&journal->j_checkpoint_mutex);
+
+	goto loop;
+
+end_loop:
+	journal->j_checkpoint_task = NULL;
+	wake_up_all(&journal->j_wait_done_checkpoint);
+	jbd2_debug(1, "%s exiting.\n", __func__);
+	return 0;
+}
+
 static int jbd2_journal_start_thread(journal_t *journal)
 {
-	struct task_struct *t;
+	struct task_struct *t, *t_ckpt;
 
 	t = kthread_run(kjournald2, journal, "jbd2/%s",
 			journal->j_devname);
@@ -271,6 +305,17 @@ static int jbd2_journal_start_thread(journal_t *journal)
 		return PTR_ERR(t);
 
 	wait_event(journal->j_wait_done_commit, journal->j_task != NULL);
+
+	t_ckpt = kthread_run(jbd2_checkpoint_thread, journal, "jbd2-ckpt/%s",
+			journal->j_devname);
+	if (IS_ERR(t_ckpt)) {
+		kthread_stop(t);
+		return PTR_ERR(t_ckpt);
+	}
+
+	wait_event(journal->j_wait_done_checkpoint,
+		   journal->j_checkpoint_task != NULL);
+
 	return 0;
 }
 
@@ -286,6 +331,14 @@ static void journal_kill_thread(journal_t *journal)
 		write_lock(&journal->j_state_lock);
 	}
 	write_unlock(&journal->j_state_lock);
+
+	while (journal->j_checkpoint_task) {
+		mutex_lock(&journal->j_checkpoint_mutex);
+		wake_up(&journal->j_wait_checkpoint);
+		wait_event(journal->j_wait_done_checkpoint,
+			   journal->j_checkpoint_task == NULL);
+		mutex_unlock(&journal->j_checkpoint_mutex);
+	}
 }
 
 /*
@@ -389,6 +442,9 @@ repeat:
 	}
 	kunmap_local(mapped_data);
 
+	/* force copy-out */
+	if (need_copy_out == 0 && journal->j_force_copy)
+		need_copy_out = 1;
 	/*
 	 * Do we need to do a data copy?
 	 */
@@ -1204,25 +1260,78 @@ static const struct seq_operations jbd2_seq_info_ops = {
 	.show   = jbd2_seq_info_show,
 };
 
-static int jbd2_seq_info_open(struct inode *inode, struct file *file)
+static void *jbd2_seq_stats_start(struct seq_file *seq, loff_t *pos)
+{
+	return *pos ? NULL : SEQ_START_TOKEN;
+}
+
+static void *jbd2_seq_stats_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	(*pos)++;
+	return NULL;
+}
+
+static int jbd2_seq_stats_show(struct seq_file *seq, void *v)
+{
+	struct jbd2_stats_proc_session *s = seq->private;
+
+	if (v != SEQ_START_TOKEN)
+		return 0;
+
+	seq_printf(seq, "%lu %lu %d %lu %lu %lu %lu %lu %lu %llu %u %u %u %d %d\n",
+		s->stats->ts_tid, s->stats->ts_requested,
+		s->journal->j_max_transaction_buffers, s->stats->run.rs_wait,
+		s->stats->run.rs_request_delay, s->stats->run.rs_running,
+		s->stats->run.rs_locked, s->stats->run.rs_flushing,
+		s->stats->run.rs_logging,
+		div_u64(s->journal->j_average_commit_time, NSEC_PER_MSEC),
+		s->stats->run.rs_handle_count, s->stats->run.rs_blocks,
+		s->stats->run.rs_blocks_logged, HZ, jiffies_to_msecs(HZ));
+	return 0;
+}
+
+static void jbd2_seq_stats_stop(struct seq_file *seq, void *v)
+{
+}
+
+static const struct seq_operations jbd2_seq_stats_ops = {
+	.start  = jbd2_seq_stats_start,
+	.next   = jbd2_seq_stats_next,
+	.stop   = jbd2_seq_stats_stop,
+	.show   = jbd2_seq_stats_show,
+};
+
+static struct jbd2_stats_proc_session *__jbd2_seq_open(struct inode *inode,
+			struct file *file)
 {
 	journal_t *journal = pde_data(inode);
 	struct jbd2_stats_proc_session *s;
-	int rc, size;
+	int size;
 
 	s = kmalloc(sizeof(*s), GFP_KERNEL);
 	if (s == NULL)
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 	size = sizeof(struct transaction_stats_s);
 	s->stats = kmalloc(size, GFP_KERNEL);
 	if (s->stats == NULL) {
 		kfree(s);
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 	}
 	spin_lock(&journal->j_history_lock);
 	memcpy(s->stats, &journal->j_stats, size);
 	s->journal = journal;
 	spin_unlock(&journal->j_history_lock);
+	return s;
+}
+
+static int jbd2_seq_info_open(struct inode *inode, struct file *file)
+{
+	struct jbd2_stats_proc_session *s;
+	int rc;
+
+	s = __jbd2_seq_open(inode, file);
+	if (IS_ERR(s))
+		return PTR_ERR(s);
 
 	rc = seq_open(file, &jbd2_seq_info_ops);
 	if (rc == 0) {
@@ -1233,7 +1342,6 @@ static int jbd2_seq_info_open(struct inode *inode, struct file *file)
 		kfree(s);
 	}
 	return rc;
-
 }
 
 static int jbd2_seq_info_release(struct inode *inode, struct file *file)
@@ -1252,6 +1360,143 @@ static const struct proc_ops jbd2_info_proc_ops = {
 	.proc_release	= jbd2_seq_info_release,
 };
 
+static int jbd2_seq_stats_open(struct inode *inode, struct file *file)
+{
+	struct jbd2_stats_proc_session *s;
+	int rc;
+
+	s = __jbd2_seq_open(inode, file);
+	if (IS_ERR(s))
+		return PTR_ERR(s);
+
+	rc = seq_open(file, &jbd2_seq_stats_ops);
+	if (rc == 0) {
+		struct seq_file *m = file->private_data;
+
+		m->private = s;
+	} else {
+		kfree(s->stats);
+		kfree(s);
+	}
+	return rc;
+}
+
+static int jbd2_seq_stats_release(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq = file->private_data;
+	struct jbd2_stats_proc_session *s = seq->private;
+
+	kfree(s->stats);
+	kfree(s);
+	return seq_release(inode, file);
+}
+
+static const struct proc_ops jbd2_stats_proc_ops = {
+	.proc_open		= jbd2_seq_stats_open,
+	.proc_read		= seq_read,
+	.proc_lseek		= seq_lseek,
+	.proc_release	= jbd2_seq_stats_release,
+};
+
+static int jbd2_seq_force_copy_show(struct seq_file *m, void *v)
+{
+	journal_t *journal = m->private;
+
+	seq_printf(m, "%u\n", journal->j_force_copy);
+	return 0;
+}
+
+static int jbd2_seq_force_copy_open(struct inode *inode, struct file *filp)
+{
+	journal_t *journal = pde_data(inode);
+
+	return single_open(filp, jbd2_seq_force_copy_show, journal);
+}
+
+/* Worst case buffer size needed for holding an integer. */
+#define PROC_NUMBUF 13
+
+static ssize_t jbd2_seq_force_copy_write(struct file *file,
+			const char __user *buf, size_t count, loff_t *offset)
+{
+	struct inode *inode = file_inode(file);
+	journal_t *journal = pde_data(inode);
+	char buffer[PROC_NUMBUF];
+	unsigned int force_copy;
+	int err;
+
+	memset(buffer, 0, sizeof(buffer));
+	if (count > sizeof(buffer) - 1)
+		count = sizeof(buffer) - 1;
+	if (copy_from_user(buffer, buf, count)) {
+		err = -EFAULT;
+		goto out;
+	}
+
+	err = kstrtouint(strstrip(buffer), 0, &force_copy);
+	if (err)
+		goto out;
+	journal->j_force_copy = force_copy;
+out:
+	return err < 0 ? err : count;
+}
+
+static const struct proc_ops jbd2_force_copy_proc_ops = {
+	.proc_open              = jbd2_seq_force_copy_open,
+	.proc_read              = seq_read,
+	.proc_write             = jbd2_seq_force_copy_write,
+	.proc_lseek             = seq_lseek,
+	.proc_release           = single_release,
+};
+
+static int jbd2_seq_stall_thresh_show(struct seq_file *m, void *v)
+{
+	journal_t *journal = m->private;
+
+	seq_printf(m, "%lu\n", journal->j_stall_thresh);
+	return 0;
+}
+
+static int jbd2_seq_stall_thresh_open(struct inode *inode, struct file *filp)
+{
+	journal_t *journal = pde_data(inode);
+
+	return single_open(filp, jbd2_seq_stall_thresh_show, journal);
+}
+
+static ssize_t jbd2_seq_stall_thresh_write(struct file *file,
+			const char __user *buf, size_t count, loff_t *offset)
+{
+	struct inode *inode = file_inode(file);
+	journal_t *journal = pde_data(inode);
+	char buffer[PROC_NUMBUF];
+	unsigned long long stall_thresh;
+	int err;
+
+	memset(buffer, 0, sizeof(buffer));
+	if (count > sizeof(buffer) - 1)
+		count = sizeof(buffer) - 1;
+	if (copy_from_user(buffer, buf, count)) {
+		err = -EFAULT;
+		goto out;
+	}
+
+	err = kstrtoull(strstrip(buffer), 0, &stall_thresh);
+	if (err)
+		goto out;
+	WRITE_ONCE(journal->j_stall_thresh, stall_thresh);
+out:
+	return err < 0 ? err : count;
+}
+
+static const struct proc_ops jbd2_stall_thresh_proc_ops = {
+	.proc_open              = jbd2_seq_stall_thresh_open,
+	.proc_read              = seq_read,
+	.proc_write             = jbd2_seq_stall_thresh_write,
+	.proc_lseek             = seq_lseek,
+	.proc_release           = single_release,
+};
+
 static struct proc_dir_entry *proc_jbd2_stats;
 
 static void jbd2_stats_proc_init(journal_t *journal)
@@ -1260,12 +1505,21 @@ static void jbd2_stats_proc_init(journal_t *journal)
 	if (journal->j_proc_entry) {
 		proc_create_data("info", S_IRUGO, journal->j_proc_entry,
 				 &jbd2_info_proc_ops, journal);
+		proc_create_data("force_copy", 0644, journal->j_proc_entry,
+				 &jbd2_force_copy_proc_ops, journal);
+		proc_create_data("stats", 0444, journal->j_proc_entry,
+				 &jbd2_stats_proc_ops, journal);
+		proc_create_data("stall_thresh", 0644, journal->j_proc_entry,
+				 &jbd2_stall_thresh_proc_ops, journal);
 	}
 }
 
 static void jbd2_stats_proc_exit(journal_t *journal)
 {
 	remove_proc_entry("info", journal->j_proc_entry);
+	remove_proc_entry("force_copy", journal->j_proc_entry);
+	remove_proc_entry("stats", journal->j_proc_entry);
+	remove_proc_entry("stall_thresh", journal->j_proc_entry);
 	remove_proc_entry(journal->j_devname, proc_jbd2_stats);
 }
 
@@ -1584,6 +1838,8 @@ static journal_t *journal_init_common(struct block_device *bdev,
 
 	init_waitqueue_head(&journal->j_wait_transaction_locked);
 	init_waitqueue_head(&journal->j_wait_done_commit);
+	init_waitqueue_head(&journal->j_wait_checkpoint);
+	init_waitqueue_head(&journal->j_wait_done_checkpoint);
 	init_waitqueue_head(&journal->j_wait_commit);
 	init_waitqueue_head(&journal->j_wait_updates);
 	init_waitqueue_head(&journal->j_wait_reserved);
@@ -1599,6 +1855,7 @@ static journal_t *journal_init_common(struct block_device *bdev,
 	journal->j_commit_interval = (HZ * JBD2_DEFAULT_MAX_COMMIT_AGE);
 	journal->j_min_batch_time = 0;
 	journal->j_max_batch_time = 15000; /* 15ms */
+	journal->j_stall_thresh = JBD2_DEFAULT_TRANS_STALL_THRESH;
 	atomic_set(&journal->j_reserved_credits, 0);
 	lockdep_init_map(&journal->j_trans_commit_map, "jbd2_handle",
 			 &jbd2_trans_commit_key, 0);

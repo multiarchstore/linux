@@ -31,6 +31,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/suspend.h>
 #include <linux/switchtec.h>
+#include <linux/vgaarb.h>
 #include "pci.h"
 
 /*
@@ -382,6 +383,78 @@ static void quirk_tigerpoint_bm_sts(struct pci_dev *dev)
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_TGP_LPC, quirk_tigerpoint_bm_sts);
 #endif
+
+static void loongson_pcie_msi_quirk(struct pci_dev *dev)
+{
+	u16 val;
+	u16 class;
+	class = dev->class >> 8;
+	if (class == PCI_CLASS_BRIDGE_HOST) {
+		pci_read_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS, &val);
+		val |= PCI_MSI_FLAGS_ENABLE;
+		pci_write_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS, val);
+	}
+}
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_LOONGSON, 0x7a59, loongson_pcie_msi_quirk);
+
+#define DEV_LS7A1000_DC 0x7a06
+#define DEV_LS7A2000_DC 0x7a36
+#define DEV_LS2K3000_DC 0x7a46
+static void loongson_vgadev_quirk(struct pci_dev *pdev)
+{
+	struct pci_dev *devp = NULL;
+
+	while ((devp = pci_get_class(PCI_CLASS_DISPLAY_VGA << 8, devp))) {
+		/* If the graphics card is SM750, set it as a slave */
+		if (devp->vendor == 0x126f && devp->device == 0x0750) {
+			vga_set_default_device(pdev);
+			dev_info(&pdev->dev,
+				"Overriding boot device as %X:%X\n",
+				pdev->vendor, pdev->device);
+			break;
+		}
+
+		if (devp->vendor != PCI_VENDOR_ID_LOONGSON) {
+			vga_set_default_device(devp);
+			dev_info(&pdev->dev,
+				"Overriding boot device as %X:%X\n",
+				devp->vendor, devp->device);
+		}
+	}
+}
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_LOONGSON, DEV_LS7A1000_DC, loongson_vgadev_quirk);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_LOONGSON, DEV_LS7A2000_DC, loongson_vgadev_quirk);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_LOONGSON, DEV_LS2K3000_DC, loongson_vgadev_quirk);
+
+#define DEV_PCIE_PORT_4	0x7a39
+#define DEV_PCIE_PORT_5	0x7a49
+#define DEV_PCIE_PORT_6	0x7a59
+#define DEV_PCIE_PORT_7	0x7a69
+static void loongson_d3_and_link_quirk(struct pci_dev *dev)
+{
+	struct pci_bus *bus = dev->bus;
+	struct pci_dev *bridge;
+	static const struct pci_device_id bridge_devids[] = {
+		{ PCI_VDEVICE(LOONGSON, DEV_PCIE_PORT_4) },
+		{ PCI_VDEVICE(LOONGSON, DEV_PCIE_PORT_5) },
+		{ PCI_VDEVICE(LOONGSON, DEV_PCIE_PORT_6) },
+		{ PCI_VDEVICE(LOONGSON, DEV_PCIE_PORT_7) },
+		{ 0, },
+	};
+
+	/* look for the matching bridge */
+	while (!pci_is_root_bus(bus)) {
+		bridge = bus->self;
+		bus = bus->parent;
+		if (bridge && pci_match_id(bridge_devids, bridge)) {
+			dev->dev_flags |= (PCI_DEV_FLAGS_NO_D3 |
+				PCI_DEV_FLAGS_NO_LINK_SPEED_CHANGE);
+			dev->no_d1d2 = 1;
+		break;
+		}
+	}
+}
+DECLARE_PCI_FIXUP_ENABLE(PCI_ANY_ID, PCI_ANY_ID, loongson_d3_and_link_quirk);
 
 /* Chipsets where PCI->PCI transfers vanish or hang */
 static void quirk_nopcipci(struct pci_dev *dev)
@@ -4537,6 +4610,7 @@ DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a01, PCI_CLASS_NOT_DEFINED, 
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a02, PCI_CLASS_NOT_DEFINED, 8,
 			      quirk_relaxedordering_disable);
 
+#ifndef CONFIG_SW64
 /*
  * Per PCIe r3.0, sec 2.2.9, "Completion headers must supply the same
  * values for the Attribute as were supplied in the header of the
@@ -4593,6 +4667,7 @@ static void quirk_chelsio_T5_disable_root_port_attributes(struct pci_dev *pdev)
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CHELSIO, PCI_ANY_ID,
 			 quirk_chelsio_T5_disable_root_port_attributes);
+#endif
 
 /*
  * pci_acs_ctrl_enabled - compare desired ACS controls with those provided
@@ -4989,6 +5064,18 @@ static int  pci_quirk_wangxun_nic_acs(struct pci_dev *dev, u16 acs_flags)
 	return false;
 }
 
+static int pci_quirk_loongson_acs(struct pci_dev *dev, u16 acs_flags)
+{
+	/*
+	 * Loongson PCIe Root Ports don't advertise an ACS capability, but
+	 * they do not allow peer-to-peer transactions between Root Ports.
+	 * Allow each Root Port to be in a separate IOMMU group by masking
+	 * SV/RR/CR/UF bits.
+	 */
+	return pci_acs_ctrl_enabled(acs_flags,
+		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
+}
+
 static const struct pci_dev_acs_enabled {
 	u16 vendor;
 	u16 device;
@@ -5087,12 +5174,30 @@ static const struct pci_dev_acs_enabled {
 	{ PCI_VENDOR_ID_AMPERE, 0xE00A, pci_quirk_xgene_acs },
 	{ PCI_VENDOR_ID_AMPERE, 0xE00B, pci_quirk_xgene_acs },
 	{ PCI_VENDOR_ID_AMPERE, 0xE00C, pci_quirk_xgene_acs },
+#ifdef CONFIG_ARCH_PHYTIUM
+	/* because PLX switch Vendor id is 0x10b5 on phytium cpu */
+	{ 0x10b5, PCI_ANY_ID, pci_quirk_xgene_acs },
+	/* because rootcomplex Vendor id is 0x17cd on phytium cpu */
+	{ 0x17cd, PCI_ANY_ID, pci_quirk_xgene_acs },
+#endif
+
 	/* Broadcom multi-function device */
 	{ PCI_VENDOR_ID_BROADCOM, 0x16D7, pci_quirk_mf_endpoint_acs },
 	{ PCI_VENDOR_ID_BROADCOM, 0x1750, pci_quirk_mf_endpoint_acs },
 	{ PCI_VENDOR_ID_BROADCOM, 0x1751, pci_quirk_mf_endpoint_acs },
 	{ PCI_VENDOR_ID_BROADCOM, 0x1752, pci_quirk_mf_endpoint_acs },
 	{ PCI_VENDOR_ID_BROADCOM, 0xD714, pci_quirk_brcm_acs },
+	/* Loongson PCIe Root Ports */
+	{ PCI_VENDOR_ID_LOONGSON, 0x3C09, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x3C19, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x3C29, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A09, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A19, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A29, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A39, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A49, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A59, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A69, pci_quirk_loongson_acs },
 	/* Amazon Annapurna Labs */
 	{ PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031, pci_quirk_al_acs },
 	/* Zhaoxin multi-function devices */
@@ -6246,3 +6351,18 @@ static void pci_fixup_d3cold_delay_1sec(struct pci_dev *pdev)
 	pdev->d3cold_delay = 1000;
 }
 DECLARE_PCI_FIXUP_FINAL(0x5555, 0x0004, pci_fixup_d3cold_delay_1sec);
+/*
+ * On Alibaba yitian710 Soc, the Hardware does always clear pcie config space
+ * and some key registers between resetting the secondary bus. This results in
+ * the OS cannot recover the fatal pcie error, which causes unexpected system
+ * error finally.
+ *
+ * Luckily, it seems a simple save/restore of these regs during the bus reset
+ * can fix the issues.
+ */
+static void quirk_save_yitian710_regs(struct pci_dev *dev)
+{
+	dev->broken_bus_reset = 1;
+}
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_ALIBABA, 0x8000,
+			      PCI_CLASS_BRIDGE_PCI, 8, quirk_save_yitian710_regs);

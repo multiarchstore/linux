@@ -388,6 +388,10 @@ source "drivers/gpu/drm/solomon/Kconfig"
 
 source "drivers/gpu/drm/sprd/Kconfig"
 
+source "drivers/gpu/drm/phytium/Kconfig"
+
+source "drivers/gpu/drm/inspur/Kconfig"
+
 config DRM_HYPERV
 	tristate "DRM Support for Hyper-V synthetic video device"
 	depends on DRM && PCI && MMU && HYPERV
@@ -436,3 +440,9 @@ config DRM_LIB_RANDOM
 config DRM_PRIVACY_SCREEN
 	bool
 	default n
+
+config HYDCU_FIXUP_HEADER
+	bool "Enable fixup header support for HYDCU"
+	help
+	  Choose this option if you want to use pci passthrough with HYDCU
+	  HYDCU cannot support pci reset, so enable this module to disable pci reset

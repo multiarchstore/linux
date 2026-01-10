@@ -877,9 +877,18 @@ xfs_break_dax_layouts(
 	struct inode		*inode,
 	bool			*retry)
 {
+	struct xfs_inode	*ip = XFS_I(inode);
 	struct page		*page;
 
-	ASSERT(xfs_isilocked(XFS_I(inode), XFS_MMAPLOCK_EXCL));
+	ASSERT(xfs_isilocked(ip, XFS_MMAPLOCK_EXCL));
+
+	/*
+	 * For inodes flagged with XFS_REFLINK_{PRIMARY, SECONDARY}, users
+	 * can ensure there are no inflight dio operations on these inodes,
+	 * so we can bypass xfs_break_dax_layouts(BREAK_UNMAP) safely.
+	 */
+	if (ip->i_reflink_flags & (XFS_REFLINK_PRIMARY | XFS_REFLINK_SECONDARY))
+		return 0;
 
 	page = dax_layout_busy_page(inode->i_mapping);
 	if (!page)
@@ -1216,6 +1225,19 @@ xfs_file_remap_range(
 
 	if (xfs_file_sync_writes(file_in) || xfs_file_sync_writes(file_out))
 		xfs_log_force_inode(dest);
+
+	if (remapped && (src->i_reflink_flags & XFS_REFLINK_PRIMARY)) {
+		mutex_lock(&mp->m_reflink_opt_lock);
+		src->i_reflink_opt_ip = dest;
+		dest->i_reflink_opt_ip = src;
+		mutex_unlock(&mp->m_reflink_opt_lock);
+
+		if (!xfs_has_rmapbt(mp)) {
+			set_bit(AS_FSDAX_NORMAP, &VFS_I(src)->i_mapping->flags);
+			set_bit(AS_FSDAX_NORMAP, &VFS_I(dest)->i_mapping->flags);
+		}
+	}
+
 out_unlock:
 	xfs_iunlock2_remapping(src, dest);
 	if (ret)

@@ -586,6 +586,9 @@
 			nokmem -- Disable kernel memory accounting.
 			nobpf -- Disable BPF memory accounting.
 
+	cgwb_v1		Enable writeback control for cgroup for cgroup v1
+			interface.
+
 	checkreqprot=	[SELINUX] Set initial checkreqprot flag value.
 			Format: { "0" | "1" }
 			See security/selinux/Kconfig help text.
@@ -2313,6 +2316,11 @@
 	isapnp=		[ISAPNP]
 			Format: <RDP>,<reset>,<pci_scan>,<verbosity>
 
+	zhaoxin_patch_bitmask=
+			[X86] Bitmask for Zhaoxin Platform's patch.
+			bit 0: enable KH-40000 dma patch's node check function
+
+
 	isolcpus=	[KNL,SMP,ISOL] Isolate a given set of CPUs from disturbance.
 			[Deprecated - use cpusets instead]
 			Format: [flag-list,]<cpu-list>
@@ -3287,6 +3295,11 @@
 
 	mga=		[HW,DRM]
 
+	microcode.force_minrev=	[X86]
+			Format: <bool>
+			Enable or disable the microcode minimal revision
+			enforcement for the runtime microcode loader.
+
 	min_addr=nn[KMG]	[KNL,BOOT,IA-64] All physical memory below this
 			physical address is ignored.
 
@@ -3438,6 +3451,13 @@
 			modules without (valid) signatures will fail to load.
 			Note that if CONFIG_MODULE_SIG_FORCE is set, that
 			is always true, so this option does nothing.
+
+	module.sig_enforce_subsys
+			[KNL] When CONFIG_MODULE_SIG is set, this means that
+			modules the user set without (valid) signatures will
+			fail to load. Note that CONFIG_MODULE_SIG_FORCE is set,
+			that is always true, so this option does nothing.
+			Now we support gpu, block and net.
 
 	module_blacklist=  [KNL] Do not load a comma-separated list of
 			modules.  Useful for debugging problem modules.
@@ -3932,9 +3952,10 @@
 			vulnerability. System may allow data leaks with this
 			option.
 
-	no-steal-acc	[X86,PV_OPS,ARM64,PPC/PSERIES] Disable paravirtualized
-			steal time accounting. steal time is computed, but
-			won't influence scheduler behaviour
+	no-steal-acc	[X86,PV_OPS,ARM64,PPC/PSERIES,RISCV,LOONGARCH,EARLY]
+			Disable paravirtualized steal time accounting. steal time
+			is computed, but won't influence scheduler behaviour
+
 
 	nosync		[HW,M68K] Disables sync negotiation for all devices.
 
@@ -7027,6 +7048,11 @@
 
 	vmpoff=		[KNL,S390] Perform z/VM CP command after power off.
 			Format: <command>
+
+	vring_force_dma_api
+			Force virtio vring to use dma api. This is only needed
+			on xdragon platform (prior to 20181230 release, e.g.
+			0930 release).
 
 	vsyscall=	[X86-64]
 			Controls the behavior of vsyscalls (i.e. calls to

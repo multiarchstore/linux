@@ -478,6 +478,25 @@ resv_iova:
 	return 0;
 }
 
+int iova_reserve_domain_addr(struct iommu_domain *domain, dma_addr_t start, dma_addr_t end)
+{
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;
+	struct iova_domain *iovad = &cookie->iovad;
+
+	unsigned long lo, hi;
+
+	lo = iova_pfn(iovad, start);
+	hi = iova_pfn(iovad, end);
+
+	if (!cookie)
+		return -EINVAL;
+
+	reserve_iova(iovad, lo, hi);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(iova_reserve_domain_addr);
+
 static int iova_reserve_iommu_regions(struct device *dev,
 		struct iommu_domain *domain)
 {
@@ -607,7 +626,7 @@ static int iommu_dma_init_domain(struct iommu_domain *domain, dma_addr_t base,
 		}
 
 		ret = 0;
-		goto done_unlock;
+		goto iova_reserve;
 	}
 
 	init_iova_domain(iovad, 1UL << order, base_pfn);
@@ -620,6 +639,7 @@ static int iommu_dma_init_domain(struct iommu_domain *domain, dma_addr_t base,
 	    (!device_iommu_capable(dev, IOMMU_CAP_DEFERRED_FLUSH) || iommu_dma_init_fq(domain)))
 		domain->type = IOMMU_DOMAIN_DMA;
 
+iova_reserve:
 	ret = iova_reserve_iommu_regions(dev, domain);
 
 done_unlock:
@@ -1610,7 +1630,7 @@ static size_t iommu_dma_max_mapping_size(struct device *dev)
 	return SIZE_MAX;
 }
 
-static const struct dma_map_ops iommu_dma_ops = {
+static const struct dma_map_ops iommu_dmafops = {
 	.flags			= DMA_F_PCI_P2PDMA_SUPPORTED,
 	.alloc			= iommu_dma_alloc,
 	.free			= iommu_dma_free,
@@ -1653,7 +1673,7 @@ void iommu_setup_dma_ops(struct device *dev, u64 dma_base, u64 dma_limit)
 	if (iommu_is_dma_domain(domain)) {
 		if (iommu_dma_init_domain(domain, dma_base, dma_limit, dev))
 			goto out_err;
-		dev->dma_ops = &iommu_dma_ops;
+		dev->dma_ops = &iommu_dmafops;
 	}
 
 	return;

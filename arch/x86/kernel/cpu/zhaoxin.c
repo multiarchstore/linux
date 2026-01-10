@@ -66,29 +66,31 @@ static void early_init_zhaoxin(struct cpuinfo_x86 *c)
 		set_cpu_cap(c, X86_FEATURE_NONSTOP_TSC);
 	}
 
-	if (c->cpuid_level >= 0x00000001) {
-		u32 eax, ebx, ecx, edx;
+	/*
+	 * These CPUs declare support SSE4.2 instruction sets but
+	 * having low performance CRC32C instruction implementation.
+	 */
+	if (c->x86 == 0x6 || (c->x86 == 0x7 && c->x86_model <= 0x3b))
+		set_cpu_cap(c, X86_FEATURE_CRC32C_LOW_PERF);
 
-		cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
-		/*
-		 * If HTT (EDX[28]) is set EBX[16:23] contain the number of
-		 * apicids which are reserved per package. Store the resulting
-		 * shift value for the package management code.
-		 */
-		if (edx & (1U << 28))
-			c->x86_coreid_bits = get_count_order((ebx >> 16) & 0xff);
-	}
+	if (cpuid_eax(0xC0000000) >= 0xC0000006)
+		c->x86_capability[CPUID_C000_0006_EAX] = cpuid_eax(0xC0000006);
 
+	if (detect_extended_topology_early(c) < 0)
+		detect_ht_early(c);
 }
 
 static void init_zhaoxin(struct cpuinfo_x86 *c)
 {
 	early_init_zhaoxin(c);
+	detect_extended_topology(c);
 	init_intel_cacheinfo(c);
-	detect_num_cpu_cores(c);
+	if (!cpu_has(c, X86_FEATURE_XTOPOLOGY)) {
+		detect_num_cpu_cores(c);
 #ifdef CONFIG_X86_32
 	detect_ht(c);
 #endif
+	}
 
 	if (c->cpuid_level > 9) {
 		unsigned int eax = cpuid_eax(10);

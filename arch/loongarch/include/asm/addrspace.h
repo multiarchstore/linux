@@ -36,6 +36,10 @@ extern unsigned long vm_map_base;
 #define UNCACHE_BASE		CSR_DMW0_BASE
 #endif
 
+#ifndef WRITECOMBINE_BASE
+#define WRITECOMBINE_BASE	CSR_DMW2_BASE
+#endif
+
 #define DMW_PABITS	48
 #define TO_PHYS_MASK	((1ULL << DMW_PABITS) - 1)
 
@@ -124,6 +128,7 @@ extern unsigned long vm_map_base;
 #define PCI_IOSIZE	SZ_32M
 #define ISA_IOSIZE	SZ_16K
 #define IO_SPACE_LIMIT	(PCI_IOSIZE - 1)
+#define ISA_PHY_IOBASE  LOONGSON_LIO_BASE
 
 #define PHYS_LINK_KADDR	PHYSADDR(VMLINUX_LOAD_ADDRESS)
 

@@ -69,4 +69,6 @@ int xfs_fsbulkstat_one_fmt(struct xfs_ibulk *breq,
 			   const struct xfs_bulkstat *bstat);
 int xfs_fsinumbers_fmt(struct xfs_ibulk *breq, const struct xfs_inumbers *igrp);
 
+int xfs_wait_reflink_secondary(struct xfs_mount *mp, struct xfs_inode *ip, u32 timeout_sec);
+
 #endif

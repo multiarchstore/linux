@@ -100,6 +100,7 @@ config X86
 	select ARCH_HAS_SYNC_CORE_BEFORE_USERMODE
 	select ARCH_HAS_SYSCALL_WRAPPER
 	select ARCH_HAS_UBSAN_SANITIZE_ALL
+	select ARCH_USE_MEMREMAP_PROT
 	select ARCH_HAS_DEBUG_WX
 	select ARCH_HAS_ZONE_DMA_SET if EXPERT
 	select ARCH_HAVE_NMI_SAFE_CMPXCHG
@@ -479,8 +480,11 @@ config GOLDFISH
 config X86_CPU_RESCTRL
 	bool "x86 CPU resource control support"
 	depends on X86 && (CPU_SUP_INTEL || CPU_SUP_AMD)
+	depends on MISC_FILESYSTEMS
 	select KERNFS
-	select PROC_CPU_RESCTRL		if PROC_FS
+	select ARCH_HAS_CPU_RESCTRL
+	select RESCTRL_FS
+	select RESCTRL_FS_PSEUDO_LOCK
 	help
 	  Enable x86 CPU resource control support.
 
@@ -1312,18 +1316,43 @@ config X86_REBOOTFIXUPS
 
 config MICROCODE
 	def_bool y
-	depends on CPU_SUP_AMD || CPU_SUP_INTEL
+	depends on CPU_SUP_AMD || CPU_SUP_INTEL || CPU_SUP_HYGON
+
+config MICROCODE_INITRD32
+	def_bool y
+	depends on MICROCODE && X86_32 && BLK_DEV_INITRD
 
 config MICROCODE_LATE_LOADING
 	bool "Late microcode loading (DANGEROUS)"
 	default n
-	depends on MICROCODE
+	depends on MICROCODE && SMP
 	help
 	  Loading microcode late, when the system is up and executing instructions
 	  is a tricky business and should be avoided if possible. Just the sequence
 	  of synchronizing all cores and SMT threads is one fragile dance which does
 	  not guarantee that cores might not softlock after the loading. Therefore,
-	  use this at your own risk. Late loading taints the kernel too.
+	  use this at your own risk. Late loading taints the kernel unless the
+	  microcode header indicates that it is safe for late loading via the
+	  minimal revision check. This minimal revision check can be enforced on
+	  the kernel command line with "microcode.minrev=Y".
+
+config MICROCODE_LATE_FORCE_MINREV
+	bool "Enforce late microcode loading minimal revision check"
+	default n
+	depends on MICROCODE_LATE_LOADING
+	help
+	  To prevent that users load microcode late which modifies already
+	  in use features, newer microcode patches have a minimum revision field
+	  in the microcode header, which tells the kernel which minimum
+	  revision must be active in the CPU to safely load that new microcode
+	  late into the running system. If disabled the check will not
+	  be enforced but the kernel will be tainted when the minimal
+	  revision check fails.
+
+	  This minimal revision check can also be controlled via the
+	  "microcode.minrev" parameter on the kernel command line.
+
+	  If unsure say Y.
 
 config X86_MSR
 	tristate "/dev/cpu/*/msr - Model-specific register support"
@@ -2015,6 +2044,29 @@ config EFI_RUNTIME_MAP
 	  mappings after kexec, but can also be used for debugging purposes.
 
 	  See also Documentation/ABI/testing/sysfs-firmware-efi-runtime-map.
+
+config HYGON_CSV
+	bool "Hygon secure virtualization CSV support"
+	default y
+	depends on CPU_SUP_HYGON && AMD_MEM_ENCRYPT && CMA
+	help
+	  Hygon CSV integrates secure processor, memory encryption and
+	  memory isolation to provide the ability to protect guest's private
+	  data. It has evolved from CSV, CSV2 to CSV3.
+
+	  For CSV, the guest's memory is encrypted.
+
+	  For CSV2, not only the guest's memory, but also the guest's vCPU
+	  registers are encrypted, neither other guests nor the host can tamper
+	  with the vCPU registers.
+
+	  For CSV3, the guest's context like vCPU registers, control block and
+	  nested page table is accessed only by the guest itself and the secure
+	  processor. Neither other guests nor the host can tamper with the
+	  guest's context.
+
+	  Say Y here to enable support for the whole capbilities of Hygon secure
+	  virtualization on hygon processor.
 
 source "kernel/Kconfig.hz"
 

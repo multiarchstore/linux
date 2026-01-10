@@ -553,6 +553,10 @@ struct vm_fault {
 					 * page table to avoid allocation from
 					 * atomic context.
 					 */
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /*
@@ -632,6 +636,11 @@ struct vm_operations_struct {
 	 */
 	struct page *(*find_special_page)(struct vm_area_struct *vma,
 					  unsigned long addr);
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 #ifdef CONFIG_NUMA_BALANCING
@@ -1343,7 +1352,6 @@ void set_pte_range(struct vm_fault *vmf, struct folio *folio,
 		struct page *page, unsigned int nr, unsigned long addr);
 
 vm_fault_t finish_fault(struct vm_fault *vmf);
-vm_fault_t finish_mkwrite_fault(struct vm_fault *vmf);
 #endif
 
 /*
@@ -1692,26 +1700,26 @@ static inline bool __cpupid_match_pid(pid_t task_pid, int cpupid)
 
 #define cpupid_match_pid(task, cpupid) __cpupid_match_pid(task->pid, cpupid)
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
-static inline int page_cpupid_xchg_last(struct page *page, int cpupid)
+static inline int folio_xchg_last_cpupid(struct folio *folio, int cpupid)
 {
-	return xchg(&page->_last_cpupid, cpupid & LAST_CPUPID_MASK);
+	return xchg(&folio->_last_cpupid, cpupid & LAST_CPUPID_MASK);
 }
 
-static inline int page_cpupid_last(struct page *page)
+static inline int folio_last_cpupid(struct folio *folio)
 {
-	return page->_last_cpupid;
+	return folio->_last_cpupid;
 }
 static inline void page_cpupid_reset_last(struct page *page)
 {
 	page->_last_cpupid = -1 & LAST_CPUPID_MASK;
 }
 #else
-static inline int page_cpupid_last(struct page *page)
+static inline int folio_last_cpupid(struct folio *folio)
 {
-	return (page->flags >> LAST_CPUPID_PGSHIFT) & LAST_CPUPID_MASK;
+	return (folio->flags >> LAST_CPUPID_PGSHIFT) & LAST_CPUPID_MASK;
 }
 
-extern int page_cpupid_xchg_last(struct page *page, int cpupid);
+int folio_xchg_last_cpupid(struct folio *folio, int cpupid);
 
 static inline void page_cpupid_reset_last(struct page *page)
 {
@@ -1719,11 +1727,12 @@ static inline void page_cpupid_reset_last(struct page *page)
 }
 #endif /* LAST_CPUPID_NOT_IN_PAGE_FLAGS */
 
-static inline int xchg_page_access_time(struct page *page, int time)
+static inline int folio_xchg_access_time(struct folio *folio, int time)
 {
 	int last_time;
 
-	last_time = page_cpupid_xchg_last(page, time >> PAGE_ACCESS_TIME_BUCKETS);
+	last_time = folio_xchg_last_cpupid(folio,
+					   time >> PAGE_ACCESS_TIME_BUCKETS);
 	return last_time << PAGE_ACCESS_TIME_BUCKETS;
 }
 
@@ -1737,19 +1746,19 @@ static inline void vma_set_access_pid_bit(struct vm_area_struct *vma)
 	}
 }
 #else /* !CONFIG_NUMA_BALANCING */
-static inline int page_cpupid_xchg_last(struct page *page, int cpupid)
+static inline int folio_xchg_last_cpupid(struct folio *folio, int cpupid)
 {
-	return page_to_nid(page); /* XXX */
+	return folio_nid(folio); /* XXX */
 }
 
-static inline int xchg_page_access_time(struct page *page, int time)
+static inline int folio_xchg_access_time(struct folio *folio, int time)
 {
 	return 0;
 }
 
-static inline int page_cpupid_last(struct page *page)
+static inline int folio_last_cpupid(struct folio *folio)
 {
-	return page_to_nid(page); /* XXX */
+	return folio_nid(folio); /* XXX */
 }
 
 static inline int cpupid_to_nid(int cpupid)
@@ -1950,15 +1959,15 @@ static inline bool page_maybe_dma_pinned(struct page *page)
  *
  * The caller has to hold the PT lock and the vma->vm_mm->->write_protect_seq.
  */
-static inline bool page_needs_cow_for_dma(struct vm_area_struct *vma,
-					  struct page *page)
+static inline bool folio_needs_cow_for_dma(struct vm_area_struct *vma,
+					  struct folio *folio)
 {
 	VM_BUG_ON(!(raw_read_seqcount(&vma->vm_mm->write_protect_seq) & 1));
 
 	if (!test_bit(MMF_HAS_PINNED, &vma->vm_mm->flags))
 		return false;
 
-	return page_maybe_dma_pinned(page);
+	return folio_maybe_dma_pinned(folio);
 }
 
 /**
@@ -2128,21 +2137,49 @@ static inline size_t folio_size(struct folio *folio)
 }
 
 /**
- * folio_estimated_sharers - Estimate the number of sharers of a folio.
+ * folio_likely_mapped_shared - Estimate if the folio is mapped into the page
+ *				tables of more than one MM
  * @folio: The folio.
  *
- * folio_estimated_sharers() aims to serve as a function to efficiently
- * estimate the number of processes sharing a folio. This is done by
- * looking at the precise mapcount of the first subpage in the folio, and
- * assuming the other subpages are the same. This may not be true for large
- * folios. If you want exact mapcounts for exact calculations, look at
- * page_mapcount() or folio_total_mapcount().
+ * This function checks if the folio is currently mapped into more than one
+ * MM ("mapped shared"), or if the folio is only mapped into a single MM
+ * ("mapped exclusively").
  *
- * Return: The estimated number of processes sharing a folio.
+ * As precise information is not easily available for all folios, this function
+ * estimates the number of MMs ("sharers") that are currently mapping a folio
+ * using the number of times the first page of the folio is currently mapped
+ * into page tables.
+ *
+ * For small anonymous folios (except KSM folios) and anonymous hugetlb folios,
+ * the return value will be exactly correct, because they can only be mapped
+ * at most once into an MM, and they cannot be partially mapped.
+ *
+ * For other folios, the result can be fuzzy:
+ *    #. For partially-mappable large folios (THP), the return value can wrongly
+ *       indicate "mapped exclusively" (false negative) when the folio is
+ *       only partially mapped into at least one MM.
+ *    #. For pagecache folios (including hugetlb), the return value can wrongly
+ *       indicate "mapped shared" (false positive) when two VMAs in the same MM
+ *       cover the same file range.
+ *    #. For (small) KSM folios, the return value can wrongly indicate "mapped
+ *       shared" (false negative), when the folio is mapped multiple times into
+ *       the same MM.
+ *
+ * Further, this function only considers current page table mappings that
+ * are tracked using the folio mapcount(s).
+ *
+ * This function does not consider:
+ *    #. If the folio might get mapped in the (near) future (e.g., swapcache,
+ *       pagecache, temporary unmapping for migration).
+ *    #. If the folio is mapped differently (VM_PFNMAP).
+ *    #. If hugetlb page table sharing applies. Callers might want to check
+ *       hugetlb_pmd_shared().
+ *
+ * Return: Whether the folio is estimated to be mapped into more than one MM.
  */
-static inline int folio_estimated_sharers(struct folio *folio)
+static inline bool folio_likely_mapped_shared(struct folio *folio)
 {
-	return page_mapcount(folio_page(folio, 0));
+	return page_mapcount(folio_page(folio, 0)) > 1;
 }
 
 #ifndef HAVE_ARCH_MAKE_PAGE_ACCESSIBLE
@@ -2333,6 +2370,8 @@ struct folio *vm_normal_folio(struct vm_area_struct *vma, unsigned long addr,
 			     pte_t pte);
 struct page *vm_normal_page(struct vm_area_struct *vma, unsigned long addr,
 			     pte_t pte);
+struct folio *vm_normal_folio_pmd(struct vm_area_struct *vma,
+				  unsigned long addr, pmd_t pmd);
 struct page *vm_normal_page_pmd(struct vm_area_struct *vma, unsigned long addr,
 				pmd_t pmd);
 
@@ -3467,6 +3506,10 @@ int remap_pfn_range_notrack(struct vm_area_struct *vma, unsigned long addr,
 int vm_insert_page(struct vm_area_struct *, unsigned long addr, struct page *);
 int vm_insert_pages(struct vm_area_struct *vma, unsigned long addr,
 			struct page **pages, unsigned long *num);
+int vm_insert_page_mkspecial(struct vm_area_struct *vma, unsigned long addr,
+			     struct page *page);
+int vm_insert_pages_mkspecial(struct vm_area_struct *vma, unsigned long addr,
+			      struct page **pages, unsigned long *num);
 int vm_map_pages(struct vm_area_struct *vma, struct page **pages,
 				unsigned long num);
 int vm_map_pages_zero(struct vm_area_struct *vma, struct page **pages,
@@ -3763,8 +3806,9 @@ void *sparse_buffer_alloc(unsigned long size);
 struct page * __populate_section_memmap(unsigned long pfn,
 		unsigned long nr_pages, int nid, struct vmem_altmap *altmap,
 		struct dev_pagemap *pgmap);
-void pmd_init(void *addr);
 void pud_init(void *addr);
+void pmd_init(void *addr);
+void kernel_pte_init(void *addr);
 pgd_t *vmemmap_pgd_populate(unsigned long addr, int node);
 p4d_t *vmemmap_p4d_populate(pgd_t *pgd, unsigned long addr, int node);
 pud_t *vmemmap_pud_populate(p4d_t *p4d, unsigned long addr, int node);
@@ -4067,5 +4111,116 @@ static inline void accept_memory(phys_addr_t start, phys_addr_t end)
 }
 
 #endif
+
+#ifdef CONFIG_ASYNC_FORK
+#define ASYNC_FORK_CANDIDATE	0
+DECLARE_STATIC_KEY_FALSE(async_fork_enabled_key);
+DECLARE_STATIC_KEY_FALSE(async_fork_staging_key);
+static inline bool async_fork_enabled(void)
+{
+	return static_branch_unlikely(&async_fork_enabled_key);
+}
+static inline bool async_fork_staging(void)
+{
+	return static_branch_unlikely(&async_fork_staging_key);
+}
+
+int async_fork_cpr_fast(struct vm_area_struct *vma, struct vm_area_struct *mpnt);
+void async_fork_cpr_bind(struct mm_struct *oldmm, struct mm_struct *mm, int err);
+void async_fork_cpr_rest(void);
+void async_fork_cpr_done(struct mm_struct *mm, bool r, bool l);
+
+bool __is_pmd_async_fork(pmd_t pmd);
+void __async_fork_fixup_pmd(struct vm_area_struct *mpnt, pmd_t *pmd,
+			    unsigned long addr);
+void __async_fork_fixup_vma(struct vm_area_struct *mpnt);
+
+static inline bool is_pmd_async_fork(pmd_t pmd)
+{
+	if (async_fork_staging())
+		return __is_pmd_async_fork(pmd);
+	return false;
+}
+static inline void async_fork_fixup_pmd(struct vm_area_struct *mpnt, pmd_t *pmd,
+					unsigned long addr)
+{
+	if (async_fork_staging())
+		__async_fork_fixup_pmd(mpnt, pmd, addr);
+}
+static inline void async_fork_fixup_vma(struct vm_area_struct *mpnt)
+{
+	if (async_fork_staging())
+		__async_fork_fixup_vma(mpnt);
+}
+#else
+static inline bool async_fork_enabled(void)
+{
+	return false;
+}
+static inline bool async_fork_staging(void)
+{
+	return false;
+}
+
+static inline int async_fork_cpr_fast(struct vm_area_struct *vma,
+				      struct vm_area_struct *mpnt)
+{
+	return -EOPNOTSUPP;
+}
+static inline void async_fork_cpr_bind(struct mm_struct *oldmm,
+				       struct mm_struct *mm, int err)
+{
+}
+static inline void async_fork_cpr_rest(void)
+{
+}
+static inline void async_fork_cpr_done(struct mm_struct *mm, bool r, bool l)
+{
+}
+
+static inline bool is_pmd_async_fork(pmd_t pmd)
+{
+	return false;
+}
+static inline void async_fork_fixup_pmd(struct vm_area_struct *mpnt,
+					pmd_t *pmd, unsigned long addr)
+{
+}
+static inline void async_fork_fixup_vma(struct vm_area_struct *mpnt)
+{
+}
+#endif
+
+struct fast_reflink_work {
+	struct work_struct work;
+	struct address_space *mapping;
+};
+
+int fast_reflink_apply(struct address_space *mapping, pgoff_t start,
+		       pgoff_t end);
+bool is_pmd_fast_reflink(pmd_t pmd);
+void fast_reflink_fixup_pmd(struct vm_area_struct *vma, pmd_t *pmd,
+			    unsigned long addr);
+void fast_reflink_fixup_vma(struct vm_area_struct *vma);
+
+static inline bool is_pmd_transient(pmd_t pmd)
+{
+	if (is_pmd_fast_reflink(pmd))
+		return true;
+	if (is_pmd_async_fork(pmd))
+		return true;
+	return false;
+}
+static inline void fixup_pmd(struct vm_area_struct *vma,
+				pmd_t *pmd, unsigned long addr)
+{
+	fast_reflink_fixup_pmd(vma, pmd, addr);
+	async_fork_fixup_pmd(vma, pmd, addr);
+}
+static inline void fixup_vma(struct vm_area_struct *vma)
+{
+	fast_reflink_fixup_vma(vma);
+	async_fork_fixup_vma(vma);
+}
 
 #endif /* _LINUX_MM_H */

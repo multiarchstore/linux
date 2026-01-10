@@ -619,6 +619,13 @@ static inline bool id_aa64pfr1_sme(u64 pfr1)
 	return val > 0;
 }
 
+static inline bool id_aa64pfr0_mpam(u64 pfr0)
+{
+	u32 val = cpuid_feature_extract_unsigned_field(pfr0, ID_AA64PFR0_EL1_MPAM_SHIFT);
+
+	return val > 0;
+}
+
 static inline bool id_aa64pfr1_mte(u64 pfr1)
 {
 	u32 val = cpuid_feature_extract_unsigned_field(pfr1, ID_AA64PFR1_EL1_MTE_SHIFT);
@@ -855,6 +862,32 @@ static inline u32 id_aa64mmfr0_parange_to_phys_shift(int parange)
 	}
 }
 
+static inline u32 id_aa64mmfr0_pa_range_bits(u64 mmfr0)
+{
+	u32 parange;
+
+	parange = cpuid_feature_extract_unsigned_field(mmfr0,
+				ID_AA64MMFR0_EL1_PARANGE_SHIFT);
+	return id_aa64mmfr0_parange_to_phys_shift(parange);
+}
+
+static inline u32 id_aa64mmfr2_varange_to_virt_shift(int varange)
+{
+	switch (varange) {
+	case ID_AA64MMFR2_EL1_VARange_48: return 48;
+	case ID_AA64MMFR2_EL1_VARange_52: return 52;
+	default: return CONFIG_ARM64_VA_BITS;
+	}
+}
+
+static inline u32 id_aa64mmfr2_va_range_bits(u64 mmfr2)
+{
+	u32 varange;
+
+	varange = cpuid_feature_extract_unsigned_field(mmfr2, ID_AA64MMFR2_EL1_VARange_SHIFT);
+	return id_aa64mmfr2_varange_to_virt_shift(varange);
+}
+
 /* Check whether hardware update of the Access flag is supported */
 static inline bool cpu_has_hw_af(void)
 {
@@ -923,6 +956,7 @@ extern struct arm64_ftr_override arm64_sw_feature_override;
 
 u32 get_kvm_ipa_limit(void);
 void dump_cpu_features(void);
+unsigned int arch_cpufreq_get_khz(int cpu);
 
 #endif /* __ASSEMBLY__ */
 

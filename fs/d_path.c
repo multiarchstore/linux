@@ -196,6 +196,58 @@ restart:
 	return error;
 }
 
+static int prepend_path_locked(const struct path *path,
+			       const struct path *root,
+			       struct prepend_buffer *p)
+{
+	struct prepend_buffer b;
+	unsigned seq = 0;
+	int error;
+
+	rcu_read_lock();
+restart:
+	b = *p;
+	read_seqbegin_or_lock(&rename_lock, &seq);
+	error = __prepend_path(path->dentry, real_mount(path->mnt), root, &b);
+	if (!(seq & 1))
+		rcu_read_unlock();
+	if (need_seqretry(&rename_lock, seq)) {
+		seq = 1;
+		goto restart;
+	}
+	done_seqretry(&rename_lock, seq);
+
+	if (unlikely(error == 3))
+		b = *p;
+
+	if (b.len == p->len)
+		prepend_char(&b, '/');
+
+	*p = b;
+	return error;
+}
+
+/*
+ * d_absolute_path_locked - return the absolute path of a dentry
+ *
+ * @path: path to report
+ * @buf: buffer to return value in
+ * @buflen: buffer length
+ *
+ * Write absolute pathname like d_absolute_path() except with mount_lock held.
+ */
+char *d_absolute_path_locked(const struct path *path, char *buf, int buflen)
+{
+	struct path root = {};
+	DECLARE_BUFFER(b, buf, buflen);
+
+	prepend_char(&b, 0);
+	if (unlikely(prepend_path_locked(path, &root, &b) > 1))
+		return ERR_PTR(-EINVAL);
+	return extract_string(&b);
+}
+EXPORT_SYMBOL(d_absolute_path_locked);
+
 /**
  * __d_path - return the path of a dentry
  * @path: the dentry/vfsmount to report

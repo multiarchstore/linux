@@ -224,7 +224,7 @@ config EFI_DISABLE_PCI_DMA
 
 config EFI_EARLYCON
 	def_bool y
-	depends on SERIAL_EARLYCON && !ARM && !IA64
+	depends on SERIAL_EARLYCON && !ARM && !IA64 && !SW64
 	select FONT_SUPPORT
 	select ARCH_USE_MEMREMAP_PROT
 
@@ -301,3 +301,12 @@ config UEFI_CPER_X86
 	bool
 	depends on UEFI_CPER && X86
 	default y
+
+config YITIAN_CPER_RAWDATA
+	bool "Print Yitian custom raw data about platform error info"
+	depends on EFI && ACPI && ARM64
+	help
+	  Allow print Yitian custom raw data about platform error info,
+	  including CMN, GIC, SMMU, DDR, etc. It gathers more useful error
+	  information from hardware, which helps to debug and test RAS
+	  feature.

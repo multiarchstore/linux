@@ -53,8 +53,32 @@ int housekeeping_any_cpu(enum hk_type type)
 }
 EXPORT_SYMBOL_GPL(housekeeping_any_cpu);
 
+#ifdef CONFIG_CGROUP_SCHED
+/*
+ * dyn_allowed  -- allowed CPUs for wild tasks.
+ *
+ * dyn_isolated -- isolated CPUs for wild tasks.
+ *
+ * dyn_possible -- possible CPUs for dynamical isolation.
+ */
+static cpumask_var_t dyn_allowed;
+static cpumask_var_t dyn_isolated;
+static cpumask_var_t dyn_possible;
+
+static bool dyn_isolcpus_ready;
+
+DEFINE_STATIC_KEY_FALSE(dyn_isolcpus_enabled);
+EXPORT_SYMBOL_GPL(dyn_isolcpus_enabled);
+#endif
+
 const struct cpumask *housekeeping_cpumask(enum hk_type type)
 {
+#ifdef CONFIG_CGROUP_SCHED
+	if (static_branch_unlikely(&dyn_isolcpus_enabled))
+		if (BIT(type) & HK_FLAG_DOMAIN)
+			return dyn_allowed;
+#endif
+
 	if (static_branch_unlikely(&housekeeping_overridden))
 		if (housekeeping.flags & BIT(type))
 			return housekeeping.cpumasks[type];
@@ -72,6 +96,12 @@ EXPORT_SYMBOL_GPL(housekeeping_affine);
 
 bool housekeeping_test_cpu(int cpu, enum hk_type type)
 {
+#ifdef CONFIG_CGROUP_SCHED
+	if (static_branch_unlikely(&dyn_isolcpus_enabled))
+		if (BIT(type) & HK_FLAG_DOMAIN)
+			return cpumask_test_cpu(cpu, dyn_allowed);
+#endif
+
 	if (static_branch_unlikely(&housekeeping_overridden))
 		if (housekeeping.flags & BIT(type))
 			return cpumask_test_cpu(cpu, housekeeping.cpumasks[type]);
@@ -79,9 +109,29 @@ bool housekeeping_test_cpu(int cpu, enum hk_type type)
 }
 EXPORT_SYMBOL_GPL(housekeeping_test_cpu);
 
+#ifdef CONFIG_CGROUP_SCHED
+static inline void free_dyn_masks(void)
+{
+	free_cpumask_var(dyn_allowed);
+	free_cpumask_var(dyn_isolated);
+	free_cpumask_var(dyn_possible);
+}
+#endif
+
 void __init housekeeping_init(void)
 {
 	enum hk_type type;
+
+#ifdef CONFIG_CGROUP_SCHED
+	if (zalloc_cpumask_var(&dyn_allowed, GFP_KERNEL) &&
+	    zalloc_cpumask_var(&dyn_isolated, GFP_KERNEL) &&
+	    zalloc_cpumask_var(&dyn_possible, GFP_KERNEL)) {
+		cpumask_copy(dyn_allowed, cpu_possible_mask);
+		cpumask_copy(dyn_possible, cpu_possible_mask);
+		dyn_isolcpus_ready = true;
+	} else
+		free_dyn_masks();
+#endif
 
 	if (!housekeeping.flags)
 		return;
@@ -95,6 +145,13 @@ void __init housekeeping_init(void)
 		/* We need at least one CPU to handle housekeeping work */
 		WARN_ON_ONCE(cpumask_empty(housekeeping.cpumasks[type]));
 	}
+#ifdef CONFIG_CGROUP_SCHED
+	if (dyn_isolcpus_ready && (housekeeping.flags & HK_FLAG_DOMAIN) &&
+	    type < HK_TYPE_MAX) {
+		cpumask_copy(dyn_allowed, housekeeping.cpumasks[type]);
+		cpumask_copy(dyn_possible, housekeeping.cpumasks[type]);
+	}
+#endif
 }
 
 static void __init housekeeping_setup_type(enum hk_type type,
@@ -244,3 +301,134 @@ static int __init housekeeping_isolcpus_setup(char *str)
 	return housekeeping_setup(str, flags);
 }
 __setup("isolcpus=", housekeeping_isolcpus_setup);
+
+#ifdef CONFIG_CGROUP_SCHED
+static int dyn_isolcpus_show(struct seq_file *s, void *p)
+{
+	seq_printf(s, "%*pbl\n", cpumask_pr_args(dyn_isolated));
+
+	return 0;
+}
+
+static int dyn_isolcpus_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, dyn_isolcpus_show, NULL);
+}
+
+void wilds_cpus_allowed(struct cpumask *pmask)
+{
+	if (static_branch_unlikely(&dyn_isolcpus_enabled))
+		cpumask_and(pmask, pmask, dyn_allowed);
+}
+
+void update_wilds_cpumask(cpumask_var_t new_allowed, cpumask_var_t old_allowed)
+{
+	struct task_struct *g, *task;
+
+	rcu_read_lock();
+	for_each_process_thread(g, task) {
+		if (task->flags & PF_KTHREAD)
+			continue;
+
+		if (!cpumask_equal(task->cpus_ptr, old_allowed))
+			continue;
+
+		set_cpus_allowed_ptr(task, new_allowed);
+	}
+	rcu_read_unlock();
+}
+
+static DEFINE_MUTEX(dyn_isolcpus_mutex);
+
+static ssize_t write_dyn_isolcpus(struct file *file, const char __user *buf,
+					size_t count, loff_t *ppos)
+{
+	int ret = count;
+	cpumask_var_t isolated;
+	cpumask_var_t new_allowed;
+	cpumask_var_t old_allowed;
+
+	mutex_lock(&dyn_isolcpus_mutex);
+
+	if (!zalloc_cpumask_var(&isolated, GFP_KERNEL)) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	if (!zalloc_cpumask_var(&new_allowed, GFP_KERNEL)) {
+		ret = -ENOMEM;
+		goto free_isolated;
+	}
+
+	if (!zalloc_cpumask_var(&old_allowed, GFP_KERNEL)) {
+		ret = -ENOMEM;
+		goto free_new_allowed;
+	}
+
+	if (cpumask_parselist_user(buf, count, isolated)) {
+		ret = -EINVAL;
+		goto free_all;
+	}
+
+	if (!cpumask_subset(isolated, dyn_possible)) {
+		ret = -EINVAL;
+		goto free_all;
+	}
+
+	/* At least reserve one for wild tasks to run */
+	cpumask_andnot(new_allowed, dyn_possible, isolated);
+	if (!cpumask_intersects(new_allowed, cpu_online_mask)) {
+		ret = -EINVAL;
+		goto free_all;
+	}
+
+	cpumask_copy(old_allowed, dyn_allowed);
+	cpumask_copy(dyn_allowed, new_allowed);
+	cpumask_copy(dyn_isolated, isolated);
+
+	if (cpumask_empty(dyn_isolated))
+		static_branch_disable(&dyn_isolcpus_enabled);
+	else
+		static_branch_enable(&dyn_isolcpus_enabled);
+
+	update_wilds_cpumask(new_allowed, old_allowed);
+
+	rebuild_sched_domains();
+	workqueue_set_unbound_cpumask(new_allowed);
+
+free_all:
+	free_cpumask_var(old_allowed);
+free_new_allowed:
+	free_cpumask_var(new_allowed);
+free_isolated:
+	free_cpumask_var(isolated);
+out:
+	mutex_unlock(&dyn_isolcpus_mutex);
+
+	return ret;
+}
+
+static const struct proc_ops proc_dyn_isolcpus_operations = {
+	.proc_open		= dyn_isolcpus_open,
+	.proc_read		= seq_read,
+	.proc_write		= write_dyn_isolcpus,
+	.proc_lseek		= noop_llseek,
+	.proc_release		= single_release,
+};
+
+static int __init dyn_isolcpus_init(void)
+{
+	if (dyn_isolcpus_ready &&
+	    !proc_create("dyn_isolcpus", 0200, NULL,
+				&proc_dyn_isolcpus_operations)) {
+		dyn_isolcpus_ready = false;
+		free_dyn_masks();
+	}
+
+	if (!dyn_isolcpus_ready)
+		pr_err("Initialize Dynamical Isolation Failed\n");
+
+	return 0;
+}
+early_initcall(dyn_isolcpus_init);
+#endif

@@ -142,8 +142,6 @@ void account_user_time(struct task_struct *p, u64 cputime)
  */
 void account_guest_time(struct task_struct *p, u64 cputime)
 {
-	u64 *cpustat = kcpustat_this_cpu->cpustat;
-
 	/* Add guest time to process. */
 	p->utime += cputime;
 	account_group_user_time(p, cputime);
@@ -152,10 +150,10 @@ void account_guest_time(struct task_struct *p, u64 cputime)
 	/* Add guest time to cpustat. */
 	if (task_nice(p) > 0) {
 		task_group_account_field(p, CPUTIME_NICE, cputime);
-		cpustat[CPUTIME_GUEST_NICE] += cputime;
+		task_group_account_field(p, CPUTIME_GUEST_NICE, cputime);
 	} else {
 		task_group_account_field(p, CPUTIME_USER, cputime);
-		cpustat[CPUTIME_GUEST] += cputime;
+		task_group_account_field(p, CPUTIME_GUEST, cputime);
 	}
 }
 
@@ -231,17 +229,32 @@ void account_idle_time(u64 cputime)
 }
 
 
-#ifdef CONFIG_SCHED_CORE
+#if defined(CONFIG_SCHED_CORE) || defined(CONFIG_SCHED_ACPU)
 /*
- * Account for forceidle time due to core scheduling.
+ * Account for sibidle, and for forceidle time due to core scheduling.
  *
  * REQUIRES: schedstat is enabled.
  */
-void __account_forceidle_time(struct task_struct *p, u64 delta)
+void __account_sibidle_time(struct task_struct *p, u64 delta, u64 delta_task, bool fi)
 {
-	__schedstat_add(p->stats.core_forceidle_sum, delta);
+	unsigned int cpu = task_cpu(p);
 
-	task_group_account_field(p, CPUTIME_FORCEIDLE, delta);
+	__schedstat_add(p->stats.core_sibidle_sum, delta);
+	__schedstat_add(p->stats.core_sibidle_task_sum, delta_task);
+	kcpustat_cpu(cpu).cpustat[CPUTIME_SIBIDLE] += delta;
+	kcpustat_cpu(cpu).cpustat[CPUTIME_SIBIDLE_TASK] += delta_task;
+	cgroup_account_cputime_field(p, CPUTIME_SIBIDLE, delta);
+	cgroup_account_cputime_field(p, CPUTIME_SIBIDLE_TASK, delta_task);
+#ifdef CONFIG_SCHED_CORE
+	if (fi) {
+		__schedstat_add(p->stats.core_forceidle_sum, delta);
+		__schedstat_add(p->stats.core_forceidle_task_sum, delta_task);
+		kcpustat_cpu(cpu).cpustat[CPUTIME_FORCEIDLE] += delta;
+		kcpustat_cpu(cpu).cpustat[CPUTIME_FORCEIDLE_TASK] += delta_task;
+		cgroup_account_cputime_field(p, CPUTIME_FORCEIDLE, delta);
+		cgroup_account_cputime_field(p, CPUTIME_FORCEIDLE_TASK, delta_task);
+	}
+#endif
 }
 #endif
 

@@ -315,10 +315,18 @@ __generic_remap_file_range_prep(struct file *file_in, loff_t pos_in,
 	if (!same_inode)
 		inode_dio_wait(inode_out);
 
-	ret = filemap_write_and_wait_range(inode_in->i_mapping,
-			pos_in, pos_in + *len - 1);
-	if (ret)
-		return ret;
+	if (remap_flags & REMAP_FILE_FAST_REFLINK) {
+		ret = fast_reflink_apply(inode_in->i_mapping,
+					 pos_in >> PAGE_SHIFT,
+					 (pos_in + *len - 1) >> PAGE_SHIFT);
+		if (ret)
+			return ret;
+	} else {
+		ret = filemap_write_and_wait_range(inode_in->i_mapping,
+				pos_in, pos_in + *len - 1);
+		if (ret)
+			return ret;
+	}
 
 	ret = filemap_write_and_wait_range(inode_out->i_mapping,
 			pos_out, pos_out + *len - 1);

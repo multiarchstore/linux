@@ -1046,6 +1046,12 @@ config HAVE_HARDLOCKUP_DETECTOR_BUDDY
 	depends on SMP
 	default y
 
+config SDEI_WATCHDOG
+	bool "SDEI NMI Watchdog support"
+	depends on ARM_SDE_INTERFACE
+	depends on HARDLOCKUP_DETECTOR
+	select HARDLOCKUP_DETECTOR_COUNTS_HRTIMER
+
 #
 # Global switch whether to build a hardlockup detector at all. It is available
 # only when the architecture supports at least one implementation. There are
@@ -1062,6 +1068,7 @@ config HARDLOCKUP_DETECTOR
 	depends on HAVE_HARDLOCKUP_DETECTOR_PERF || HAVE_HARDLOCKUP_DETECTOR_BUDDY || HAVE_HARDLOCKUP_DETECTOR_ARCH
 	imply HARDLOCKUP_DETECTOR_PERF
 	imply HARDLOCKUP_DETECTOR_BUDDY
+	imply SDEI_WATCHDOG
 	imply HARDLOCKUP_DETECTOR_ARCH
 	select LOCKUP_DETECTOR
 
@@ -1255,6 +1262,13 @@ config SCHEDSTATS
 	  If you aren't debugging the scheduler or trying to tune a specific
 	  application, you can say N to avoid the very slight overhead
 	  this adds.
+
+config SCHED_ACPU
+	bool "ACPU info: account idle time of smt to task"
+	depends on DEBUG_KERNEL && PROC_FS && SMP && SCHED_SMT
+	default y
+	help
+	  Add ACPU info in /proc/<pid>/sched.
 
 endmenu
 

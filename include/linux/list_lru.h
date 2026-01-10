@@ -54,6 +54,9 @@ struct list_lru {
 	bool			memcg_aware;
 	struct xarray		xa;
 #endif
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 void list_lru_destroy(struct list_lru *lru);

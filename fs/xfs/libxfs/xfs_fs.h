@@ -766,6 +766,11 @@ struct xfs_scrub_metadata {
 #  define XFS_XATTR_LIST_MAX 65536
 #endif
 
+enum {
+	XFS_REFLINK_NORMAL      = 0,
+	XFS_REFLINK_PRIMARY     = (1 << 0),
+	XFS_REFLINK_SECONDARY   = (1 << 1),
+};
 
 /*
  * ioctl commands that are used by Linux filesystems
@@ -839,6 +844,10 @@ struct xfs_scrub_metadata {
 #define XFS_IOC_INUMBERS	     _IOR ('X', 128, struct xfs_inumbers_req)
 /*	XFS_IOC_GETFSUUID ---------- deprecated 140	 */
 
+
+#define	XFS_IOC_SET_REFLINK_FLAGS	_IOW('X', 200, uint32_t)
+#define	XFS_IOC_GET_REFLINK_FLAGS	_IOR('X', 201, uint32_t)
+#define	XFS_IOC_WAIT_REFLINK_SECONDARY	_IOW('X', 202, uint32_t)
 
 #ifndef HAVE_BBMACROS
 /*

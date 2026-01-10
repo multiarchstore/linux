@@ -29,4 +29,10 @@ extern int sysctl_numa_balancing_mode;
 #define sysctl_numa_balancing_mode	0
 #endif
 
+#ifdef CONFIG_SCHED_ACPU
+extern unsigned int sysctl_sched_acpu_enabled;
+extern int sched_acpu_enable_handler(struct ctl_table *table, int write,
+				     void __user *buffer, size_t *lenp,
+				     loff_t *ppos);
+#endif
 #endif /* _LINUX_SCHED_SYSCTL_H */

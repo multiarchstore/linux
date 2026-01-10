@@ -13,6 +13,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/kmsan.h>
 #include <linux/spinlock.h>
+#include <linux/moduleparam.h>
 #include <xen/xen.h>
 
 #ifdef DEBUG
@@ -251,6 +252,21 @@ static bool virtqueue_use_indirect(const struct vring_virtqueue *vq,
 	return (vq->indirect && total_sg > 1 && vq->vq.num_free);
 }
 
+static bool vring_force_dma_api;
+
+#ifdef MODULE
+module_param(vring_force_dma_api, bool, 0640);
+#else
+static int __init vring_dma_api_setup(char *str)
+{
+	vring_force_dma_api = true;
+	printk(KERN_INFO "Force vring dma api enabled\n");
+
+	return 0;
+}
+__setup("vring_force_dma_api", vring_dma_api_setup);
+#endif
+
 /*
  * Modern virtio devices have feature bits to specify whether they need a
  * quirk and bypass the IOMMU. If not there, just use the DMA API.
@@ -279,6 +295,13 @@ static bool virtqueue_use_indirect(const struct vring_virtqueue *vq,
 
 static bool vring_use_dma_api(const struct virtio_device *vdev)
 {
+	/*
+	 * Prior to xdragon platform 20181230 release (e.g. 0930 release), we
+	 * need this hack to get ENI hotplug to work.
+	 */
+	if (vring_force_dma_api)
+		return true;
+
 	if (!virtio_has_dma_quirk(vdev))
 		return true;
 

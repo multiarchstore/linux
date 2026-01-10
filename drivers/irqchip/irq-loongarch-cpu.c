@@ -13,6 +13,8 @@
 #include <asm/loongarch.h>
 #include <asm/setup.h>
 
+#include "irq-loongson.h"
+
 static struct irq_domain *irq_domain;
 struct fwnode_handle *cpuintc_handle;
 
@@ -140,10 +142,18 @@ static int __init acpi_cascade_irqdomain_init(void)
 	if (r < 0)
 		return r;
 
-	return 0;
+	if (cpu_has_avecint)
+		r = avecintc_acpi_init(irq_domain);
+
+	return r;
 }
 
-static int __init cpuintc_acpi_init(union acpi_subtable_headers *header,
+struct irq_domain *get_cpudomain(void)
+{
+	return irq_domain;
+}
+
+int __init cpuintc_acpi_init(union acpi_subtable_headers *header,
 				   const unsigned long end)
 {
 	int ret;

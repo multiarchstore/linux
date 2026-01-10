@@ -123,4 +123,43 @@ static inline bool task_is_in_init_pid_ns(struct task_struct *tsk)
 	return task_active_pid_ns(tsk) == &init_pid_ns;
 }
 
+#ifdef CONFIG_RICH_CONTAINER
+extern int sysctl_rich_container_enable;
+extern int sysctl_rich_container_source;
+extern int sysctl_rich_container_cpuinfo_source;
+extern unsigned int sysctl_rich_container_cpuinfo_sharesbase;
+
+static inline struct task_struct *rich_container_get_scenario(void)
+{
+	if (sysctl_rich_container_source == 1)
+		return task_active_pid_ns(current)->child_reaper;
+
+	return current;
+}
+
+static inline bool in_rich_container(struct task_struct *tsk)
+{
+	if (sysctl_rich_container_enable == 0)
+		return false;
+
+	return !task_is_in_init_pid_ns(tsk) && child_cpuacct(tsk);
+}
+
+void rich_container_get_cpuset_cpus(struct cpumask *pmask);
+#else
+static inline bool in_rich_container(struct task_struct *tsk)
+{
+	return false;
+}
+
+static inline void rich_container_get_cpuset_cpus(struct cpumask *pmask)
+{
+}
+
+static inline struct task_struct *rich_container_get_scenario(void)
+{
+	return NULL;
+}
+#endif
+
 #endif /* _LINUX_PID_NS_H */

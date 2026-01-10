@@ -89,6 +89,11 @@ struct mq_inflight {
 	unsigned int inflight[2];
 };
 
+struct mq_hang {
+	struct block_device *part;
+	unsigned int hang[2];
+};
+
 static bool blk_mq_check_inflight(struct request *rq, void *priv)
 {
 	struct mq_inflight *mi = priv;
@@ -119,6 +124,29 @@ void blk_mq_in_flight_rw(struct request_queue *q, struct block_device *part,
 	blk_mq_queue_tag_busy_iter(q, blk_mq_check_inflight, &mi);
 	inflight[0] = mi.inflight[0];
 	inflight[1] = mi.inflight[1];
+}
+
+static bool blk_mq_check_hang(struct request *rq, void *priv)
+{
+	struct mq_hang *mh = priv;
+	u64 now = ktime_get_ns(), duration;
+
+	duration = div_u64(now - rq->start_time_ns, NSEC_PER_MSEC);
+	if ((duration >= rq->q->rq_hang_threshold) &&
+	    (!mh->part->bd_partno || rq->part == mh->part))
+		mh->hang[rq_data_dir(rq)]++;
+
+	return true;
+}
+
+void blk_mq_hang_rw(struct request_queue *q, struct block_device *part,
+		unsigned int hang[2])
+{
+	struct mq_hang mh = { .part = part };
+
+	blk_mq_queue_tag_busy_iter(q, blk_mq_check_hang, &mh);
+	hang[0] = mh.hang[0];
+	hang[1] = mh.hang[1];
 }
 
 void blk_freeze_queue_start(struct request_queue *q)
@@ -996,6 +1024,10 @@ static inline void blk_account_io_done(struct request *req, u64 now)
 		part_stat_add(req->part, nsecs[sgrp], now - req->start_time_ns);
 		part_stat_local_dec(req->part,
 				    in_flight[op_is_write(req_op(req))]);
+		if (req->rq_flags & RQF_STATS) {
+			part_stat_add(req->part, d2c_nsecs[sgrp],
+				      now - req->io_start_time_ns);
+		}
 		part_stat_unlock();
 	}
 }

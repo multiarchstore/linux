@@ -141,6 +141,59 @@ static const char * const proc_flag_strs[] = {
 	"corrected",
 };
 
+static const char *const zdi_zpi_err_type_strs[] = {
+	"No Error",
+	"Training Error Status (PHY)",
+	"Data Link Protocol Error Status (DLL)",
+	"Surprise Down Error Status",
+	"Flow Control Protocol Error Status (TL)",
+	"Receiver Overflow Status (TL)",
+	"Receiver Error Status (PHY)",
+	"Bad TLP Status (DLL)",
+	"Bad Data Link Layer Packet (DLLP) Status (DLL)",
+	"REPLAY_NUM Rollover Status (DLL)",
+	"Replay Timer Timeout Status (DLL)",
+	"X16 Link Width Unreliable Status",
+	"ZPI X8 Link Width Unreliable Status",
+	"ZPI X4 Link Width Unreliable Status",
+	"ZPI X2 Link Width Unreliable Status",
+	"ZPI Gen3 Link Speed Unreliable Status",
+	"ZPI Gen2 Link Speed Unreliable Status",
+	"ZDI Gen3 Link Speed Unreliable Status",
+	"ZDI Gen4 Link Speed Unreliable Status",
+};
+
+const char *cper_zdi_zpi_err_type_str(unsigned int etype)
+{
+	return etype < ARRAY_SIZE(zdi_zpi_err_type_strs) ?
+		zdi_zpi_err_type_strs[etype] : "unknown error";
+}
+EXPORT_SYMBOL_GPL(cper_zdi_zpi_err_type_str);
+
+static void cper_print_proc_generic_zdi_zpi(const char *pfx,
+					    const struct cper_sec_proc_generic *zdi_zpi)
+{
+#if IS_ENABLED(CONFIG_X86)
+	u8 etype = zdi_zpi->responder_id;
+
+	if (boot_cpu_data.x86_vendor == X86_VENDOR_ZHAOXIN ||
+	    boot_cpu_data.x86_vendor == X86_VENDOR_CENTAUR) {
+		if ((zdi_zpi->requestor_id & 0xff) == 7) {
+			pr_info("%s general processor error(zpi error)\n", pfx);
+		} else if ((zdi_zpi->requestor_id & 0xff) == 6) {
+			pr_info("%s general processor error(zdi error)\n", pfx);
+		} else {
+			pr_info("%s general processor error(unknown error)\n", pfx);
+			return;
+		}
+		pr_info("%s bus number %llx device number %llx function number 0\n", pfx,
+			((zdi_zpi->requestor_id)>>8) & 0xff, zdi_zpi->requestor_id & 0xff);
+		pr_info("%s apic id %lld error_type:  %s\n", pfx, zdi_zpi->proc_id,
+			cper_zdi_zpi_err_type_str(etype));
+	}
+#endif
+}
+
 static void cper_print_proc_generic(const char *pfx,
 				    const struct cper_sec_proc_generic *proc)
 {
@@ -184,6 +237,8 @@ static void cper_print_proc_generic(const char *pfx,
 		       pfx, proc->responder_id);
 	if (proc->validation_bits & CPER_PROC_VALID_IP)
 		printk("%s""IP: 0x%016llx\n", pfx, proc->ip);
+
+	cper_print_proc_generic_zdi_zpi(pfx, proc);
 }
 
 static const char * const mem_err_type_strs[] = {
@@ -623,6 +678,142 @@ err_section_too_small:
 	pr_err(FW_WARN "error section length is too small\n");
 }
 
+#ifdef CONFIG_YITIAN_CPER_RAWDATA
+static char *yitian_raw_err_type_str(u64 type)
+{
+	switch (type) {
+	case ERR_TYPE_GENERIC:	return "GENERIC";
+	case ERR_TYPE_CORE:	return "CORE";
+	case ERR_TYPE_GIC:	return "GIC";
+	case ERR_TYPE_CMN:	return "CMN";
+	case ERR_TYPE_SMMU:	return "SMMU";
+	case ERR_TYPE_DDR:	return "DDR";
+	case ERR_TYPE_PCI:	return "PCI";
+	default:	return "Reserved";
+	}
+}
+
+void yitian_platform_raw_data_print(const char *pfx,
+				struct yitian_raw_data_header *header)
+{
+	struct yitian_ras_common_reg *common_reg;
+	int sub_record_no = 0;
+
+	yitian_estatus_for_each_raw_reg_common(header, common_reg, sub_record_no) {
+		pr_info("%s sub_type: 0x%x\n", pfx,
+		       header->sub_type[sub_record_no]);
+		pr_info("%s fr: 0x%llx, ctrl: 0x%llx, status: 0x%llx, addr: 0x%llx\n",
+		       pfx, common_reg->fr, common_reg->ctrl,
+		       common_reg->status, common_reg->addr);
+		pr_info("%s misc0: 0x%llx, misc1: 0x%llx, misc2: 0x%llx, misc3: 0x%llx\n",
+		       pfx, common_reg->misc0, common_reg->misc1,
+		       common_reg->misc2, common_reg->misc3);
+	}
+}
+
+static void yitian_ddr_raw_data_print(const char *pfx,
+				struct yitian_raw_data_header *header)
+{
+	struct yitian_ddr_raw_data *data;
+
+	data = (struct yitian_ddr_raw_data *)(header + 1);
+
+	switch (data->ex_type) {
+	case 0x1:
+		pr_info("%s Synchronous Exception taken in EL%d\n", pfx, data->el_nr);
+		break;
+	case 0x2:
+		pr_info("%s Interrupt: %d\n", pfx, data->intr);
+		break;
+	case 0x3:
+		pr_info("%s SError\n", pfx);
+		break;
+	default:
+		pr_info("%s Unknown interrupt type\n", pfx);
+	}
+
+	/* System regs is valid only when it's a synchronous exception */
+	if (data->ex_type == 1) {
+		struct yitian_ddr_sys_reg *sys_regs = &data->sys_regs;
+
+		pr_info("%s ESR: 0x%llx, ELR: 0x%llx, FAR: 0x%llx, SCR: 0x%llx, SCTLR: 0x%llx, LR: 0x%llx\n",
+			pfx, sys_regs->esr, sys_regs->elr, sys_regs->far,
+			sys_regs->scr, sys_regs->sctlr, sys_regs->lr);
+	}
+
+	/* ECC Data is valid only when it's a ECC error */
+	if (data->err_type == 1) {
+		struct yitian_ddr_ecc_data *ecc_data = &data->ecc_data;
+
+		pr_info("%s ECCERRCNT: 0x%x, ECCSTAT: 0x%x, ADVECCSTAT: 0x%x, ECCSYMBOL: 0x%x, ECCERRCNTSTAT: 0x%x, ECCERRCNT0: 0x%x, ECCERRCNT1: 0x%x, ECCCADDR0: 0x%x, ECCCADDR1: 0x%x, ECCCDATA0: 0x%x, ECCCDATA1: 0x%x, ECCUADDR0: 0x%x, ECCUADDR1: 0x%x, ECCUDATA0: 0x%x, ECCUDATA1: 0x%x\n",
+			pfx, ecc_data->eccerrcnt, ecc_data->eccstat,
+			ecc_data->adveccstat, ecc_data->eccsymbol,
+			ecc_data->eccerrcntstat, ecc_data->eccerrcnt0,
+			ecc_data->eccerrcnt1, ecc_data->ecccaddr0,
+			ecc_data->ecccaddr1, ecc_data->ecccdata0,
+			ecc_data->ecccdata1, ecc_data->eccuaddr0,
+			ecc_data->eccuaddr1, ecc_data->eccudata0,
+			ecc_data->eccudata1);
+	}
+}
+
+bool yitian_estatus_check_header(const struct acpi_hest_generic_status *estatus)
+{
+	struct yitian_raw_data_header *header;
+
+	if (estatus->raw_data_length < sizeof(*header))
+		return false;
+
+	header = (struct yitian_raw_data_header *)((void *)estatus +
+						   estatus->raw_data_offset);
+
+#define YITIAN_SIGNATURE_16(A, B)		((A) | (B << 8))
+#define YITIAN_SIGNATURE_32(A, B, C, D)		\
+	(YITIAN_SIGNATURE_16(A, B) | (YITIAN_SIGNATURE_16(C, D) << 16))
+
+	if (header->signature != YITIAN_SIGNATURE_32('r', 'a', 'w', 'd'))
+		return false;
+
+	/*
+	 * ONLY processor, CMN, GIC, and SMMU has raw error data which follow
+	 * any Generic Error Data Entries. The raw error data format is vendor
+	 * implementation defined.
+	 */
+	if (!header->common_reg_nr)
+		return false;
+
+	return true;
+}
+
+void yitian_raw_data_print(const char *pfx,
+			const struct acpi_hest_generic_status *estatus)
+{
+	struct yitian_raw_data_header *header;
+
+	if (!yitian_estatus_check_header(estatus))
+		return;
+
+	header = (struct yitian_raw_data_header *)((void *)estatus +
+						   estatus->raw_data_offset);
+
+	pr_info("%s type: %s (0x%x), common_reg_nr:%d\n", pfx,
+	       yitian_raw_err_type_str(header->type), header->type,
+	       header->common_reg_nr);
+
+	switch (header->type) {
+	case ERR_TYPE_CORE:
+	case ERR_TYPE_GIC:
+	case ERR_TYPE_CMN:
+	case ERR_TYPE_SMMU:
+		yitian_platform_raw_data_print(pfx, header);
+		break;
+	case ERR_TYPE_DDR:
+		yitian_ddr_raw_data_print(pfx, header);
+		break;
+	}
+}
+#endif /* CONFIG_YITIAN_CPER_RAWDATA */
+
 void cper_estatus_print(const char *pfx,
 			const struct acpi_hest_generic_status *estatus)
 {
@@ -643,6 +834,11 @@ void cper_estatus_print(const char *pfx,
 		cper_estatus_print_section(newpfx, gdata, sec_no);
 		sec_no++;
 	}
+
+#ifdef CONFIG_YITIAN_CPER_RAWDATA
+	if (estatus->raw_data_length)
+		yitian_raw_data_print(pfx, estatus);
+#endif /* CONFIG_YITIAN_CPER_RAWDATA */
 }
 EXPORT_SYMBOL_GPL(cper_estatus_print);
 

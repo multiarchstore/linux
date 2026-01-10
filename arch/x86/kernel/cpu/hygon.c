@@ -15,6 +15,7 @@
 #include <asm/cacheinfo.h>
 #include <asm/spec-ctrl.h>
 #include <asm/delay.h>
+#include <asm/resctrl.h>
 
 #include "cpu.h"
 
@@ -80,12 +81,14 @@ static void hygon_get_topology(struct cpuinfo_x86 *c)
 			c->x86_max_cores /= smp_num_siblings;
 
 		/*
-		 * In case leaf B is available, use it to derive
+		 * From model 0x4, leaf B is available, so use it to derive
 		 * topology information.
 		 */
 		err = detect_extended_topology(c);
-		if (!err)
+		if (!err) {
 			c->x86_coreid_bits = get_count_order(c->x86_max_cores);
+			__max_die_per_package = nodes_per_socket;
+		}
 
 		/*
 		 * Socket ID is ApicId[6] for the processors with model <= 0x3
@@ -240,6 +243,68 @@ static void bsp_init_hygon(struct cpuinfo_x86 *c)
 			x86_amd_ls_cfg_ssbd_mask = 1ULL << 10;
 		}
 	}
+	resctrl_cpu_detect(c);
+}
+
+static void init_hygon_cap(struct cpuinfo_x86 *c)
+{
+	/* Test for Extended Feature Flags presence */
+	if (cpuid_eax(0x8C860000) >= 0x8C860000) {
+		/*
+		 * Store Extended Feature Flags of the CPU capability
+		 * bit array
+		 */
+		c->x86_capability[CPUID_8C86_0000_EDX] = cpuid_edx(0x8C860000);
+	}
+}
+
+static void early_detect_mem_encrypt(struct cpuinfo_x86 *c)
+{
+	u64 msr;
+	u32 eax;
+
+	eax = cpuid_eax(0x8000001f);
+
+	/* Check whether SME or CSV is supported */
+	if (!(eax & (BIT(0) | BIT(1))))
+		return;
+
+	/* If BIOS has not enabled SME then don't advertise the SME feature. */
+	rdmsrl(MSR_AMD64_SYSCFG, msr);
+	if (!(msr & MSR_AMD64_SYSCFG_MEM_ENCRYPT))
+		goto clear_all;
+
+	/*
+	 * Always adjust physical address bits. Even though this will be a
+	 * value above 32-bits this is still done for CONFIG_X86_32 so that
+	 * accurate values are reported.
+	 */
+	c->x86_phys_bits -= (cpuid_ebx(0x8000001f) >> 6) & 0x3f;
+
+	/* Don't advertise SME and CSV features under CONFIG_X86_32. */
+	if (IS_ENABLED(CONFIG_X86_32))
+		goto clear_all;
+
+	/* Clear the SME feature flag if the kernel is not using it. */
+	if (!sme_me_mask)
+		setup_clear_cpu_cap(X86_FEATURE_SME);
+
+	/*
+	 * If BIOS has not enabled CSV then don't advertise the CSV and CSV2
+	 * feature.
+	 */
+	rdmsrl(MSR_K7_HWCR, msr);
+	if (!(msr & MSR_K7_HWCR_SMMLOCK))
+		goto clear_csv;
+
+	return;
+
+clear_all:
+	setup_clear_cpu_cap(X86_FEATURE_SME);
+clear_csv:
+	setup_clear_cpu_cap(X86_FEATURE_SEV);
+	setup_clear_cpu_cap(X86_FEATURE_SEV_ES);
+	setup_clear_cpu_cap(X86_FEATURE_CSV3);
 }
 
 static void early_init_hygon(struct cpuinfo_x86 *c)
@@ -290,6 +355,8 @@ static void early_init_hygon(struct cpuinfo_x86 *c)
 	set_cpu_cap(c, X86_FEATURE_VMMCALL);
 
 	hygon_get_topology_early(c);
+
+	early_detect_mem_encrypt(c);
 }
 
 static void init_hygon(struct cpuinfo_x86 *c)
@@ -351,6 +418,7 @@ static void init_hygon(struct cpuinfo_x86 *c)
 
 	/* Hygon CPUs don't need fencing after x2APIC/TSC_DEADLINE MSR writes. */
 	clear_cpu_cap(c, X86_FEATURE_APIC_MSRS_FENCE);
+	init_hygon_cap(c);
 }
 
 static void cpu_detect_tlb_hygon(struct cpuinfo_x86 *c)

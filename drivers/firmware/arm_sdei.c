@@ -43,8 +43,6 @@ static asmlinkage void (*sdei_firmware_call)(unsigned long function_id,
 /* entry point from firmware to arch asm code */
 static unsigned long sdei_entry_point;
 
-static int sdei_hp_state;
-
 struct sdei_event {
 	/* These three are protected by the sdei_list_lock */
 	struct list_head	list;
@@ -187,6 +185,28 @@ int sdei_api_event_context(u32 query, u64 *result)
 			      result);
 }
 NOKPROBE_SYMBOL(sdei_api_event_context);
+
+int sdei_api_event_interrupt_bind(int hwirq)
+{
+	u64 event_number;
+
+	invoke_sdei_fn(SDEI_1_0_FN_SDEI_INTERRUPT_BIND, hwirq, 0, 0, 0, 0,
+			&event_number);
+
+	return (int)event_number;
+}
+
+int sdei_api_clear_eoi(int hwirq)
+{
+	return invoke_sdei_fn(SDEI_1_0_FN_SDEI_CLEAR_EOI, hwirq, 0, 0, 0, 0,
+			NULL);
+}
+
+int sdei_api_set_secure_timer_period(int sec)
+{
+	return invoke_sdei_fn(SDEI_1_0_FN_SET_SECURE_TIMER_PERIOD, sec, 0, 0, 0,
+			0, NULL);
+}
 
 static int sdei_api_event_get_info(u32 event, u32 info, u64 *result)
 {
@@ -379,7 +399,7 @@ static int sdei_platform_reset(void)
 	return err;
 }
 
-static int sdei_api_event_enable(u32 event_num)
+int sdei_api_event_enable(u32 event_num)
 {
 	return invoke_sdei_fn(SDEI_1_0_FN_SDEI_EVENT_ENABLE, event_num, 0, 0, 0,
 			      0, NULL);
@@ -426,7 +446,7 @@ int sdei_event_enable(u32 event_num)
 	return err;
 }
 
-static int sdei_api_event_disable(u32 event_num)
+int sdei_api_event_disable(u32 event_num)
 {
 	return invoke_sdei_fn(SDEI_1_0_FN_SDEI_EVENT_DISABLE, event_num, 0, 0,
 			      0, 0, NULL);
@@ -763,7 +783,7 @@ static int sdei_device_freeze(struct device *dev)
 	int err;
 
 	/* unregister private events */
-	cpuhp_remove_state(sdei_entry_point);
+	cpuhp_remove_state(CPUHP_AP_ARM_SDEI_ONLINE);
 
 	err = sdei_unregister_shared();
 	if (err)
@@ -784,15 +804,12 @@ static int sdei_device_thaw(struct device *dev)
 		return err;
 	}
 
-	err = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "SDEI",
+	err = cpuhp_setup_state(CPUHP_AP_ARM_SDEI_ONLINE, "SDEI",
 				&sdei_cpuhp_up, &sdei_cpuhp_down);
-	if (err < 0) {
+	if (err)
 		pr_warn("Failed to re-register CPU hotplug notifier...\n");
-		return err;
-	}
 
-	sdei_hp_state = err;
-	return 0;
+	return err;
 }
 
 static int sdei_device_restore(struct device *dev)
@@ -824,7 +841,7 @@ static int sdei_reboot_notifier(struct notifier_block *nb, unsigned long action,
 	 * We are going to reset the interface, after this there is no point
 	 * doing work when we take CPUs offline.
 	 */
-	cpuhp_remove_state(sdei_hp_state);
+	cpuhp_remove_state(CPUHP_AP_ARM_SDEI_ONLINE);
 
 	sdei_platform_reset();
 
@@ -1004,14 +1021,12 @@ static int sdei_probe(struct platform_device *pdev)
 		goto remove_cpupm;
 	}
 
-	err = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "SDEI",
+	err = cpuhp_setup_state(CPUHP_AP_ARM_SDEI_ONLINE, "SDEI",
 				&sdei_cpuhp_up, &sdei_cpuhp_down);
-	if (err < 0) {
+	if (err) {
 		pr_warn("Failed to register CPU hotplug notifier...\n");
 		goto remove_reboot;
 	}
-
-	sdei_hp_state = err;
 
 	return 0;
 

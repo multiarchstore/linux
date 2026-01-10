@@ -29,9 +29,11 @@
 #include <asm/loongson.h>
 #include <asm/mmu_context.h>
 #include <asm/numa.h>
+#include <asm/paravirt.h>
 #include <asm/processor.h>
 #include <asm/setup.h>
 #include <asm/time.h>
+#include "legacy_boot.h"
 
 int __cpu_number_map[NR_CPUS];   /* Map physical to logical */
 EXPORT_SYMBOL(__cpu_number_map);
@@ -46,6 +48,9 @@ EXPORT_SYMBOL(cpu_sibling_map);
 /* Representing the core map of multi-core chips of each logical CPU */
 cpumask_t cpu_core_map[NR_CPUS] __read_mostly;
 EXPORT_SYMBOL(cpu_core_map);
+
+cpumask_t cpu_llc_shared_map[NR_CPUS] __read_mostly;
+EXPORT_SYMBOL(cpu_llc_shared_map);
 
 static DECLARE_COMPLETION(cpu_starting);
 static DECLARE_COMPLETION(cpu_running);
@@ -63,18 +68,21 @@ static cpumask_t cpu_sibling_setup_map;
 /* representing cpus for which core maps can be computed */
 static cpumask_t cpu_core_setup_map;
 
+/* representing cpus for which llc sibling maps can be computed */
+static cpumask_t cpu_llc_shared_setup_map;
+
+
 struct secondary_data cpuboot_data;
 static DEFINE_PER_CPU(int, cpu_state);
-
-enum ipi_msg_type {
-	IPI_RESCHEDULE,
-	IPI_CALL_FUNCTION,
-};
 
 static const char *ipi_types[NR_IPI] __tracepoint_string = {
 	[IPI_RESCHEDULE] = "Rescheduling interrupts",
 	[IPI_CALL_FUNCTION] = "Function call interrupts",
+	[IPI_CLEAR_VECTOR] = "Clear vector interrupts",
 };
+
+unsigned int __max_packages __read_mostly;
+EXPORT_SYMBOL(__max_packages);
 
 void show_ipi_list(struct seq_file *p, int prec)
 {
@@ -100,6 +108,42 @@ static inline void set_cpu_core_map(int cpu)
 			cpumask_set_cpu(cpu, &cpu_core_map[i]);
 		}
 	}
+}
+
+static inline bool cpus_are_shared_llc(int cpua, int cpub)
+{
+	if (cpu_to_node(cpua) != cpu_to_node(cpub))
+		return false;
+
+	return true;
+}
+
+static inline void set_cpu_llc_shared_map(int cpu)
+{
+	int i;
+
+	cpumask_set_cpu(cpu, &cpu_llc_shared_setup_map);
+
+	for_each_cpu(i, &cpu_llc_shared_setup_map) {
+		if (cpus_are_shared_llc(cpu, i)) {
+			cpumask_set_cpu(i, &cpu_llc_shared_map[cpu]);
+			cpumask_set_cpu(cpu, &cpu_llc_shared_map[i]);
+		}
+	}
+}
+
+static inline void clear_cpu_llc_shared_map(int cpu)
+{
+	int i;
+
+	for_each_cpu(i, &cpu_llc_shared_setup_map) {
+		if (cpus_are_shared_llc(cpu, i)) {
+			cpumask_clear_cpu(i, &cpu_llc_shared_map[cpu]);
+			cpumask_clear_cpu(cpu, &cpu_llc_shared_map[i]);
+		}
+	}
+
+	cpumask_clear_cpu(cpu, &cpu_llc_shared_setup_map);
 }
 
 static inline void set_cpu_sibling_map(int cpu)
@@ -190,29 +234,34 @@ static u32 ipi_read_clear(int cpu)
 
 static void ipi_write_action(int cpu, u32 action)
 {
-	unsigned int irq = 0;
+	uint32_t val;
 
-	while ((irq = ffs(action))) {
-		uint32_t val = IOCSR_IPI_SEND_BLOCKING;
-
-		val |= (irq - 1);
-		val |= (cpu << IOCSR_IPI_SEND_CPU_SHIFT);
-		iocsr_write32(val, LOONGARCH_IOCSR_IPI_SEND);
-		action &= ~BIT(irq - 1);
-	}
+	val = IOCSR_IPI_SEND_BLOCKING | action;
+	val |= (cpu << IOCSR_IPI_SEND_CPU_SHIFT);
+	iocsr_write32(val, LOONGARCH_IOCSR_IPI_SEND);
 }
 
-void loongson_send_ipi_single(int cpu, unsigned int action)
+static void loongson_send_ipi_single(int cpu, unsigned int action)
 {
 	ipi_write_action(cpu_logical_map(cpu), (u32)action);
 }
 
-void loongson_send_ipi_mask(const struct cpumask *mask, unsigned int action)
+static void loongson_send_ipi_mask(const struct cpumask *mask, unsigned int action)
 {
 	unsigned int i;
 
 	for_each_cpu(i, mask)
 		ipi_write_action(cpu_logical_map(i), (u32)action);
+}
+
+void arch_send_call_function_single_ipi(int cpu)
+{
+	smp_ops.send_ipi_single(cpu, ACTION_CALL_FUNCTION);
+}
+
+void arch_send_call_function_ipi_mask(const struct cpumask *mask)
+{
+	smp_ops.send_ipi_mask(mask, ACTION_CALL_FUNCTION);
 }
 
 /*
@@ -222,11 +271,11 @@ void loongson_send_ipi_mask(const struct cpumask *mask, unsigned int action)
  */
 void arch_smp_send_reschedule(int cpu)
 {
-	loongson_send_ipi_single(cpu, SMP_RESCHEDULE);
+	smp_ops.send_ipi_single(cpu, ACTION_RESCHEDULE);
 }
 EXPORT_SYMBOL_GPL(arch_smp_send_reschedule);
 
-irqreturn_t loongson_ipi_interrupt(int irq, void *dev)
+static irqreturn_t loongson_ipi_interrupt(int irq, void *dev)
 {
 	unsigned int action;
 	unsigned int cpu = smp_processor_id();
@@ -243,8 +292,33 @@ irqreturn_t loongson_ipi_interrupt(int irq, void *dev)
 		per_cpu(irq_stat, cpu).ipi_irqs[IPI_CALL_FUNCTION]++;
 	}
 
+	if (action & SMP_CLEAR_VECTOR) {
+		complete_irq_moving();
+		per_cpu(irq_stat, cpu).ipi_irqs[IPI_CLEAR_VECTOR]++;
+	}
+
 	return IRQ_HANDLED;
 }
+
+static void loongson_init_ipi(void)
+{
+	int r, ipi_irq;
+
+	ipi_irq = get_percpu_irq(INT_IPI);
+	if (ipi_irq < 0)
+		panic("IPI IRQ mapping failed\n");
+
+	irq_set_percpu_devid(ipi_irq);
+	r = request_percpu_irq(ipi_irq, loongson_ipi_interrupt, "IPI", &irq_stat);
+	if (r < 0)
+		panic("IPI IRQ request failed\n");
+}
+
+struct smp_ops smp_ops = {
+	.init_ipi		= loongson_init_ipi,
+	.send_ipi_single	= loongson_send_ipi_single,
+	.send_ipi_mask		= loongson_send_ipi_mask,
+};
 
 static void __init fdt_smp_setup(void)
 {
@@ -288,6 +362,7 @@ void __init loongson_smp_setup(void)
 	cpu_data[0].core = cpu_logical_map(0) % loongson_sysconf.cores_per_package;
 	cpu_data[0].package = cpu_logical_map(0) / loongson_sysconf.cores_per_package;
 
+	pv_ipi_init();
 	iocsr_write32(0xffffffff, LOONGARCH_IOCSR_IPI_EN);
 	pr_info("Detected %i available CPU(s)\n", loongson_sysconf.nr_cpus);
 }
@@ -297,11 +372,11 @@ void __init loongson_prepare_cpus(unsigned int max_cpus)
 	int i = 0;
 
 	parse_acpi_topology();
+	cpu_data[0].global_id = cpu_logical_map(0);
 
 	for (i = 0; i < loongson_sysconf.nr_cpus; i++) {
 		set_cpu_present(i, true);
 		csr_mail_send(0, __cpu_logical_map[i], 0);
-		cpu_data[i].global_id = __cpu_logical_map[i];
 	}
 
 	per_cpu(cpu_state, smp_processor_id()) = CPU_ONLINE;
@@ -312,17 +387,18 @@ void __init loongson_prepare_cpus(unsigned int max_cpus)
  */
 void loongson_boot_secondary(int cpu, struct task_struct *idle)
 {
-	unsigned long entry;
+	unsigned long entry = (unsigned long)&smpboot_entry;
 
 	pr_info("Booting CPU#%d...\n", cpu);
 
-	entry = __pa_symbol((unsigned long)&smpboot_entry);
+	if (!efi_bp)
+		entry = __pa_symbol((unsigned long)&smpboot_entry);
 	cpuboot_data.stack = (unsigned long)__KSTK_TOS(idle);
 	cpuboot_data.thread_info = (unsigned long)task_thread_info(idle);
 
 	csr_mail_send(entry, cpu_logical_map(cpu), 0);
 
-	loongson_send_ipi_single(cpu, SMP_BOOT_CPU);
+	loongson_send_ipi_single(cpu, ACTION_BOOT_CPU);
 }
 
 /*
@@ -331,7 +407,7 @@ void loongson_boot_secondary(int cpu, struct task_struct *idle)
 void loongson_init_secondary(void)
 {
 	unsigned int cpu = smp_processor_id();
-	unsigned int imask = ECFGF_IP0 | ECFGF_IP1 | ECFGF_IP2 |
+	unsigned int imask = ECFGF_SIP0 | ECFGF_IP0 | ECFGF_IP1 | ECFGF_IP2 |
 			     ECFGF_IPI | ECFGF_PMC | ECFGF_TIMER;
 
 	change_csr_ecfg(ECFG0_IM, imask);
@@ -346,6 +422,7 @@ void loongson_init_secondary(void)
 		     cpu_logical_map(cpu) / loongson_sysconf.cores_per_package;
 	cpu_data[cpu].core = pptt_enabled ? cpu_data[cpu].core :
 		     cpu_logical_map(cpu) % loongson_sysconf.cores_per_package;
+	cpu_data[cpu].global_id = cpu_logical_map(cpu);
 }
 
 void loongson_smp_finish(void)
@@ -370,10 +447,10 @@ int loongson_cpu_disable(void)
 #endif
 	set_cpu_online(cpu, false);
 	clear_cpu_sibling_map(cpu);
+	clear_cpu_llc_shared_map(cpu);
 	calculate_cpu_foreign_map();
 	local_irq_save(flags);
-	irq_migrate_all_off_this_cpu();
-	clear_csr_ecfg(ECFG0_IM);
+	fixup_irqs();
 	local_irq_restore(flags);
 	local_flush_tlb_all();
 
@@ -448,7 +525,7 @@ core_initcall(ipi_pm_init);
 #endif
 
 /* Preload SMP state for boot cpu */
-void smp_prepare_boot_cpu(void)
+void __init smp_prepare_boot_cpu(void)
 {
 	unsigned int cpu, node, rr_node;
 
@@ -481,6 +558,8 @@ void smp_prepare_boot_cpu(void)
 			rr_node = next_node_in(rr_node, node_online_map);
 		}
 	}
+
+	pv_spinlock_init();
 }
 
 /* called from main before smp_init() */
@@ -491,6 +570,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 	loongson_prepare_cpus(max_cpus);
 	set_cpu_sibling_map(0);
 	set_cpu_core_map(0);
+	set_cpu_llc_shared_map(0);
 	calculate_cpu_foreign_map();
 #ifndef CONFIG_HOTPLUG_CPU
 	init_cpu_present(cpu_possible_mask);
@@ -532,6 +612,7 @@ asmlinkage void start_secondary(void)
 
 	set_cpu_sibling_map(cpu);
 	set_cpu_core_map(cpu);
+	set_cpu_llc_shared_map(cpu);
 
 	notify_cpu_starting(cpu);
 

@@ -1364,7 +1364,7 @@ static bool ignore_undef_symbol(Elf_Half emachine, const char *name)
 }
 
 /* Change all symbols so that st_value encodes the pointer directly. */
-static int simplify_symbols(struct module *mod, const struct load_info *info)
+static int simplify_symbols(struct module *mod, struct load_info *info)
 {
 	Elf_Shdr *symsec = &info->sechdrs[info->index.sym];
 	Elf_Sym *sym = (void *)symsec->sh_addr;
@@ -1406,6 +1406,7 @@ static int simplify_symbols(struct module *mod, const struct load_info *info)
 			ksym = resolve_symbol_wait(mod, info, name);
 			/* Ok if resolved.  */
 			if (ksym && !IS_ERR(ksym)) {
+				set_module_subsys(info, name);
 				sym[i].st_value = kernel_symbol_value(ksym);
 				break;
 			}
@@ -2918,6 +2919,10 @@ static int load_module(struct load_info *info, const char __user *uargs,
 
 	/* Fix up syms, so that st_value is a pointer to location. */
 	err = simplify_symbols(mod, info);
+	if (err < 0)
+		goto free_modinfo;
+
+	err = force_subsys_sig_check(info);
 	if (err < 0)
 		goto free_modinfo;
 

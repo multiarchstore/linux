@@ -18,6 +18,11 @@ struct irq_work {
 	struct __call_single_node node;
 	void (*func)(struct irq_work *);
 	struct rcuwait irqwait;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 #define __IRQ_WORK_INIT(_func, _flags) (struct irq_work){	\

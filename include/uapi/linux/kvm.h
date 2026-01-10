@@ -264,6 +264,7 @@ struct kvm_xen_exit {
 #define KVM_EXIT_RISCV_SBI        35
 #define KVM_EXIT_RISCV_CSR        36
 #define KVM_EXIT_NOTIFY           37
+#define KVM_EXIT_LOONGARCH_IOCSR  38
 
 /* For KVM_EXIT_INTERNAL_ERROR */
 /* Emulate instruction failed. */
@@ -336,6 +337,13 @@ struct kvm_run {
 			__u32 len;
 			__u8  is_write;
 		} mmio;
+		/* KVM_EXIT_LOONGARCH_IOCSR */
+		struct {
+			__u64 phys_addr;
+			__u8  data[8];
+			__u32 len;
+			__u8  is_write;
+		} iocsr_io;
 		/* KVM_EXIT_HYPERCALL */
 		struct {
 			__u64 nr;
@@ -1193,6 +1201,8 @@ struct kvm_ppc_resize_hpt {
 #define KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE 228
 #define KVM_CAP_ARM_SUPPORTED_BLOCK_SIZES 229
 
+#define KVM_CAP_SEV_ES_GHCB 500
+
 #ifdef KVM_CAP_IRQ_ROUTING
 
 struct kvm_irq_routing_irqchip {
@@ -1362,6 +1372,7 @@ struct kvm_dirty_tlb {
 #define KVM_REG_ARM64		0x6000000000000000ULL
 #define KVM_REG_MIPS		0x7000000000000000ULL
 #define KVM_REG_RISCV		0x8000000000000000ULL
+#define KVM_REG_LOONGARCH	0x9000000000000000ULL
 
 #define KVM_REG_SIZE_SHIFT	52
 #define KVM_REG_SIZE_MASK	0x00f0000000000000ULL
@@ -1453,7 +1464,15 @@ enum kvm_device_type {
 #define KVM_DEV_TYPE_ARM_PV_TIME	KVM_DEV_TYPE_ARM_PV_TIME
 	KVM_DEV_TYPE_RISCV_AIA,
 #define KVM_DEV_TYPE_RISCV_AIA		KVM_DEV_TYPE_RISCV_AIA
+	KVM_DEV_TYPE_LOONGARCH_IPI,
+#define KVM_DEV_TYPE_LOONGARCH_IPI	KVM_DEV_TYPE_LOONGARCH_IPI
+	KVM_DEV_TYPE_LOONGARCH_EIOINTC,
+#define KVM_DEV_TYPE_LOONGARCH_EIOINTC	KVM_DEV_TYPE_LOONGARCH_EIOINTC
+	KVM_DEV_TYPE_LOONGARCH_PCHPIC,
+#define KVM_DEV_TYPE_LOONGARCH_PCHPIC	KVM_DEV_TYPE_LOONGARCH_PCHPIC
+
 	KVM_DEV_TYPE_MAX,
+
 };
 
 struct kvm_vfio_spapr_tce {
@@ -1563,6 +1582,11 @@ struct kvm_s390_ucas_mapping {
 /* Available with KVM_CAP_COUNTER_OFFSET */
 #define KVM_ARM_SET_COUNTER_OFFSET _IOW(KVMIO,  0xb5, struct kvm_arm_counter_offset)
 
+/* ioctl for SW vcpu init*/
+#define KVM_SW64_VCPU_INIT	  _IO(KVMIO,  0xba)
+#define KVM_SW64_GET_VCB          _IO(KVMIO,  0xbc)
+#define KVM_SW64_SET_VCB          _IO(KVMIO,  0xbd)
+
 /* ioctl for vm fd */
 #define KVM_CREATE_DEVICE	  _IOWR(KVMIO,  0xe0, struct kvm_create_device)
 
@@ -1570,6 +1594,10 @@ struct kvm_s390_ucas_mapping {
 #define KVM_SET_DEVICE_ATTR	  _IOW(KVMIO,  0xe1, struct kvm_device_attr)
 #define KVM_GET_DEVICE_ATTR	  _IOW(KVMIO,  0xe2, struct kvm_device_attr)
 #define KVM_HAS_DEVICE_ATTR	  _IOW(KVMIO,  0xe3, struct kvm_device_attr)
+
+/* ioctls for control vm during system reset */
+#define KVM_CONTROL_PRE_SYSTEM_RESET	 _IO(KVMIO, 0xe8)
+#define KVM_CONTROL_POST_SYSTEM_RESET	 _IO(KVMIO, 0xe9)
 
 /*
  * ioctls for vcpu fds
@@ -1918,6 +1946,9 @@ enum sev_cmd_id {
 	/* Guest Migration Extension */
 	KVM_SEV_SEND_CANCEL,
 
+	/* Hygon CSV batch command */
+	KVM_CSV_COMMAND_BATCH = 0x18,
+
 	KVM_SEV_NR_MAX,
 };
 
@@ -1996,6 +2027,14 @@ struct kvm_sev_send_update_data {
 	__u32 trans_len;
 };
 
+struct kvm_sev_send_update_vmsa {
+	__u32 vcpu_id;
+	__u64 hdr_uaddr;
+	__u32 hdr_len;
+	__u64 trans_uaddr;
+	__u32 trans_len;
+};
+
 struct kvm_sev_receive_start {
 	__u32 handle;
 	__u32 policy;
@@ -2012,6 +2051,30 @@ struct kvm_sev_receive_update_data {
 	__u32 guest_len;
 	__u64 trans_uaddr;
 	__u32 trans_len;
+};
+
+struct kvm_sev_receive_update_vmsa {
+	__u32 vcpu_id;
+	__u64 hdr_uaddr;
+	__u32 hdr_len;
+	__u64 trans_uaddr;
+	__u32 trans_len;
+};
+
+struct kvm_csv_batch_list_node {
+	__u64 cmd_data_addr;
+	__u64 addr;
+	__u64 next_cmd_addr;
+};
+
+struct kvm_csv_command_batch {
+	__u32 command_id;
+	__u64 csv_batch_list_uaddr;
+};
+
+struct kvm_csv_init {
+	__u64 userid_addr;
+	__u32 len;
 };
 
 #define KVM_DEV_ASSIGN_ENABLE_IOMMU	(1 << 0)
@@ -2255,5 +2318,62 @@ struct kvm_s390_zpci_op {
 
 /* flags for kvm_s390_zpci_op->u.reg_aen.flags */
 #define KVM_S390_ZPCIOP_REGAEN_HOST    (1 << 0)
+
+/* CSV3 command */
+enum csv3_cmd_id {
+	KVM_CSV3_NR_MIN = 0xc0,
+
+	KVM_CSV3_INIT = KVM_CSV3_NR_MIN,
+	KVM_CSV3_LAUNCH_ENCRYPT_DATA,
+	KVM_CSV3_LAUNCH_ENCRYPT_VMCB,
+	KVM_CSV3_SEND_ENCRYPT_DATA,
+	KVM_CSV3_SEND_ENCRYPT_CONTEXT,
+	KVM_CSV3_RECEIVE_ENCRYPT_DATA,
+	KVM_CSV3_RECEIVE_ENCRYPT_CONTEXT,
+
+	KVM_CSV3_NR_MAX,
+};
+
+struct kvm_csv3_init_data {
+	__u64 nodemask;
+};
+
+struct kvm_csv3_launch_encrypt_data {
+	__u64 gpa;
+	__u64 uaddr;
+	__u32 len;
+};
+
+struct kvm_csv3_send_encrypt_data {
+	__u64 hdr_uaddr;
+	__u32 hdr_len;
+	__u64 guest_addr_data;
+	__u32 guest_addr_len;
+	__u64 trans_uaddr;
+	__u32 trans_len;
+};
+
+struct kvm_csv3_send_encrypt_context {
+	__u64 hdr_uaddr;
+	__u32 hdr_len;
+	__u64 trans_uaddr;
+	__u32 trans_len;
+};
+
+struct kvm_csv3_receive_encrypt_data {
+	__u64 hdr_uaddr;
+	__u32 hdr_len;
+	__u64 guest_addr_data;
+	__u32 guest_addr_len;
+	__u64 trans_uaddr;
+	__u32 trans_len;
+};
+
+struct kvm_csv3_receive_encrypt_context {
+	__u64 hdr_uaddr;
+	__u32 hdr_len;
+	__u64 trans_uaddr;
+	__u32 trans_len;
+};
 
 #endif /* __LINUX_KVM_H */

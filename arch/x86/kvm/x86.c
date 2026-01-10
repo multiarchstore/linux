@@ -1284,7 +1284,7 @@ int kvm_set_cr3(struct kvm_vcpu *vcpu, unsigned long cr3)
 	 * stuff CR3, e.g. for RSM emulation, and there is no guarantee that
 	 * the current vCPU mode is accurate.
 	 */
-	if (kvm_vcpu_is_illegal_gpa(vcpu, cr3))
+	if (!kvm_vcpu_is_legal_cr3(vcpu, cr3))
 		return 1;
 
 	if (is_pae_paging(vcpu) && !load_pdptrs(vcpu, cr3))
@@ -1462,8 +1462,8 @@ static const u32 msrs_to_save_base[] = {
 	MSR_IA32_RTIT_ADDR2_A, MSR_IA32_RTIT_ADDR2_B,
 	MSR_IA32_RTIT_ADDR3_A, MSR_IA32_RTIT_ADDR3_B,
 	MSR_IA32_UMWAIT_CONTROL,
-
 	MSR_IA32_XFD, MSR_IA32_XFD_ERR,
+	MSR_ZX_PAUSE_CONTROL,
 };
 
 static const u32 msrs_to_save_pmu[] = {
@@ -1564,6 +1564,8 @@ static const u32 emulated_msrs_all[] = {
 
 	MSR_K7_HWCR,
 	MSR_KVM_POLL_CONTROL,
+
+	MSR_AMD64_SEV_ES_GHCB,
 };
 
 static u32 emulated_msrs[ARRAY_SIZE(emulated_msrs_all)];
@@ -1704,22 +1706,17 @@ static int do_get_msr_feature(struct kvm_vcpu *vcpu, unsigned index, u64 *data)
 	struct kvm_msr_entry msr;
 	int r;
 
+	/* Unconditionally clear the output for simplicity */
+	msr.data = 0;
 	msr.index = index;
 	r = kvm_get_msr_feature(&msr);
 
-	if (r == KVM_MSR_RET_INVALID) {
-		/* Unconditionally clear the output for simplicity */
-		*data = 0;
-		if (kvm_msr_ignored_check(index, 0, false))
-			r = 0;
-	}
-
-	if (r)
-		return r;
+	if (r == KVM_MSR_RET_INVALID && kvm_msr_ignored_check(index, 0, false))
+		r = 0;
 
 	*data = msr.data;
 
-	return 0;
+	return r;
 }
 
 static bool __kvm_valid_efer(struct kvm_vcpu *vcpu, u64 efer)
@@ -4636,6 +4633,17 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_X86_NOTIFY_VMEXIT:
 		r = kvm_caps.has_notify_vmexit;
 		break;
+	case KVM_CAP_SEV_ES_GHCB:
+		r = 0;
+
+		/* Both CSV2 and SEV-ES guests support MSR_AMD64_SEV_ES_GHCB,
+		 * but only CSV2 guest support export to emulate
+		 * MSR_AMD64_SEV_ES_GHCB.
+		 */
+		if (boot_cpu_data.x86_vendor == X86_VENDOR_HYGON)
+			r = static_call(kvm_x86_has_emulated_msr)(kvm,
+							MSR_AMD64_SEV_ES_GHCB);
+		break;
 	default:
 		break;
 	}
@@ -7107,6 +7115,20 @@ set_pit2_out:
 		r = kvm_vm_ioctl_set_msr_filter(kvm, &filter);
 		break;
 	}
+	case KVM_CONTROL_PRE_SYSTEM_RESET:
+		if (boot_cpu_data.x86_vendor == X86_VENDOR_HYGON &&
+		    kvm_x86_ops.control_pre_system_reset)
+			r = static_call(kvm_x86_control_pre_system_reset)(kvm);
+		else
+			r = -ENOTTY;
+		break;
+	case KVM_CONTROL_POST_SYSTEM_RESET:
+		if (boot_cpu_data.x86_vendor == X86_VENDOR_HYGON &&
+		    kvm_x86_ops.control_post_system_reset)
+			r = static_call(kvm_x86_control_post_system_reset)(kvm);
+		else
+			r = -ENOTTY;
+		break;
 	default:
 		r = -ENOTTY;
 	}
@@ -7149,6 +7171,10 @@ static void kvm_probe_msr_to_save(u32 msr_index)
 		break;
 	case MSR_IA32_UMWAIT_CONTROL:
 		if (!kvm_cpu_cap_has(X86_FEATURE_WAITPKG))
+			return;
+		break;
+	case MSR_ZX_PAUSE_CONTROL:
+		if (!kvm_cpu_cap_has(X86_FEATURE_ZXPAUSE))
 			return;
 		break;
 	case MSR_IA32_RTIT_CTL:
@@ -8337,6 +8363,15 @@ static void emulator_vm_bugged(struct x86_emulate_ctxt *ctxt)
 		kvm_vm_bugged(kvm);
 }
 
+static gva_t emulator_get_untagged_addr(struct x86_emulate_ctxt *ctxt,
+					gva_t addr, unsigned int flags)
+{
+	if (!kvm_x86_ops.get_untagged_addr)
+		return addr;
+
+	return static_call(kvm_x86_get_untagged_addr)(emul_to_vcpu(ctxt), addr, flags);
+}
+
 static const struct x86_emulate_ops emulate_ops = {
 	.vm_bugged           = emulator_vm_bugged,
 	.read_gpr            = emulator_read_gpr,
@@ -8381,6 +8416,7 @@ static const struct x86_emulate_ops emulate_ops = {
 	.leave_smm           = emulator_leave_smm,
 	.triple_fault        = emulator_triple_fault,
 	.set_xcr             = emulator_set_xcr,
+	.get_untagged_addr   = emulator_get_untagged_addr,
 };
 
 static void toggle_interruptibility(struct kvm_vcpu *vcpu, u32 mask)
@@ -9825,7 +9861,7 @@ static int complete_hypercall_exit(struct kvm_vcpu *vcpu)
 {
 	u64 ret = vcpu->run->hypercall.ret;
 
-	if (!is_64_bit_mode(vcpu))
+	if (!is_64_bit_hypercall(vcpu))
 		ret = (u32)ret;
 	kvm_rax_write(vcpu, ret);
 	++vcpu->stat.hypercalls;
@@ -9860,7 +9896,8 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 		a3 &= 0xFFFFFFFF;
 	}
 
-	if (static_call(kvm_x86_get_cpl)(vcpu) != 0) {
+	if (static_call(kvm_x86_get_cpl)(vcpu) != 0 &&
+	    !(nr == KVM_HC_VM_ATTESTATION || nr == KVM_HC_PSP_OP)) {
 		ret = -KVM_EPERM;
 		goto out;
 	}
@@ -9923,6 +9960,16 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu)
 		vcpu->arch.complete_userspace_io = complete_hypercall_exit;
 		return 0;
 	}
+	case KVM_HC_VM_ATTESTATION:
+		ret = -KVM_ENOSYS;
+		if (kvm_x86_ops.vm_attestation)
+			ret = static_call(kvm_x86_vm_attestation)(vcpu->kvm, a0, a1);
+		break;
+	case KVM_HC_PSP_OP:
+		ret = -KVM_ENOSYS;
+		if (kvm_x86_ops.arch_hypercall)
+			ret = static_call(kvm_x86_arch_hypercall)(vcpu->kvm, nr, a0, a1, a2, a3);
+		break;
 	default:
 		ret = -KVM_ENOSYS;
 		break;
@@ -11496,7 +11543,7 @@ static bool kvm_is_valid_sregs(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs)
 		 */
 		if (!(sregs->cr4 & X86_CR4_PAE) || !(sregs->efer & EFER_LMA))
 			return false;
-		if (kvm_vcpu_is_illegal_gpa(vcpu, sregs->cr3))
+		if (!kvm_vcpu_is_legal_cr3(vcpu, sregs->cr3))
 			return false;
 	} else {
 		/*
@@ -11526,21 +11573,24 @@ static int __set_sregs_common(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs,
 	if (kvm_set_apic_base(vcpu, &apic_base_msr))
 		return -EINVAL;
 
-	if (vcpu->arch.guest_state_protected)
+	if (vcpu->arch.guest_state_protected &&
+	    boot_cpu_data.x86_vendor != X86_VENDOR_HYGON)
 		return 0;
 
-	dt.size = sregs->idt.limit;
-	dt.address = sregs->idt.base;
-	static_call(kvm_x86_set_idt)(vcpu, &dt);
-	dt.size = sregs->gdt.limit;
-	dt.address = sregs->gdt.base;
-	static_call(kvm_x86_set_gdt)(vcpu, &dt);
+	if (!vcpu->arch.guest_state_protected) {
+		dt.size = sregs->idt.limit;
+		dt.address = sregs->idt.base;
+		static_call(kvm_x86_set_idt)(vcpu, &dt);
+		dt.size = sregs->gdt.limit;
+		dt.address = sregs->gdt.base;
+		static_call(kvm_x86_set_gdt)(vcpu, &dt);
 
-	vcpu->arch.cr2 = sregs->cr2;
-	*mmu_reset_needed |= kvm_read_cr3(vcpu) != sregs->cr3;
-	vcpu->arch.cr3 = sregs->cr3;
-	kvm_register_mark_dirty(vcpu, VCPU_EXREG_CR3);
-	static_call_cond(kvm_x86_post_set_cr3)(vcpu, sregs->cr3);
+		vcpu->arch.cr2 = sregs->cr2;
+		*mmu_reset_needed |= kvm_read_cr3(vcpu) != sregs->cr3;
+		vcpu->arch.cr3 = sregs->cr3;
+		kvm_register_mark_dirty(vcpu, VCPU_EXREG_CR3);
+		static_call_cond(kvm_x86_post_set_cr3)(vcpu, sregs->cr3);
+	}
 
 	kvm_set_cr8(vcpu, sregs->cr8);
 
@@ -11553,6 +11603,9 @@ static int __set_sregs_common(struct kvm_vcpu *vcpu, struct kvm_sregs *sregs,
 
 	*mmu_reset_needed |= kvm_read_cr4(vcpu) != sregs->cr4;
 	static_call(kvm_x86_set_cr4)(vcpu, sregs->cr4);
+
+	if (vcpu->arch.guest_state_protected)
+		return 0;
 
 	if (update_pdptrs) {
 		idx = srcu_read_lock(&vcpu->kvm->srcu);
@@ -13414,6 +13467,10 @@ int kvm_handle_invpcid(struct kvm_vcpu *vcpu, unsigned long type, gva_t gva)
 
 	switch (type) {
 	case INVPCID_TYPE_INDIV_ADDR:
+		/*
+		 * LAM doesn't apply to addresses that are inputs to TLB
+		 * invalidation.
+		 */
 		if ((!pcid_enabled && (operand.pcid != 0)) ||
 		    is_noncanonical_address(operand.gla, vcpu)) {
 			kvm_inject_gp(vcpu, 0);

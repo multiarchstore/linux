@@ -1,0 +1,15 @@
+# FILE dist arch subarch file_path REFRESH/NOREFRESH
+# LEVELINFO target_dist base_dist [base_dist ...]
+# IMPORT file
+# COLLAPSE dist
+# STRIP target_dist base_dist
+
+FILE ANCK x86   null %%DIST_OUTPUT%%/kernel-ANCK-generic-x86.config REFRESH
+FILE ANCK arm64 null %%DIST_OUTPUT%%/kernel-ANCK-generic-arm64.config REFRESH
+
+# for ANCK
+LEVELINFO ANCK null
+IMPORT ANCK-x86
+IMPORT ANCK-arm64
+
+COLLAPSE ANCK

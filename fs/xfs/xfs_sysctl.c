@@ -114,6 +114,15 @@ static struct ctl_table xfs_table[] = {
 		.extra2		= &xfs_params.syncd_timer.max
 	},
 	{
+		.procname	= "reflink_inactive_force_log_period",
+		.data		= &xfs_params.reflink_inactive_force_log_period.val,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &xfs_params.reflink_inactive_force_log_period.min,
+		.extra2		= &xfs_params.reflink_inactive_force_log_period.max
+	},
+	{
 		.procname	= "inherit_sync",
 		.data		= &xfs_params.inherit_sync.val,
 		.maxlen		= sizeof(int),

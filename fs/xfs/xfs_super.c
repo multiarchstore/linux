@@ -1528,6 +1528,11 @@ xfs_fs_fill_super(
 #endif
 	sb->s_op = &xfs_super_operations;
 
+	spin_lock_init(&mp->m_reflink_opt_gclock);
+	INIT_LIST_HEAD(&mp->m_reflink_opt_gclist);
+	INIT_WORK(&mp->m_reflink_opt_gcwork, xfs_inodegc_reflink_opt_worker);
+	init_waitqueue_head(&mp->m_reflink_opt_wait);
+
 	/*
 	 * Delay mount work if the debug hook is set. This is debug
 	 * instrumention to coordinate simulation of xfs mount failures with
@@ -2002,6 +2007,8 @@ static int xfs_init_fs_context(
 	INIT_RADIX_TREE(&mp->m_perag_tree, GFP_ATOMIC);
 	spin_lock_init(&mp->m_perag_lock);
 	mutex_init(&mp->m_growlock);
+	mutex_init(&mp->m_reflink_opt_lock);
+
 	INIT_WORK(&mp->m_flush_inodes_work, xfs_flush_inodes_worker);
 	INIT_DELAYED_WORK(&mp->m_reclaim_work, xfs_reclaim_worker);
 	mp->m_kobj.kobject.kset = xfs_kset;

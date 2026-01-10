@@ -259,7 +259,7 @@ void acpi_table_print_madt_entry (struct acpi_subtable_header *madt);
 /* the following numa functions are architecture-dependent */
 void acpi_numa_slit_init (struct acpi_table_slit *slit);
 
-#if defined(CONFIG_X86) || defined(CONFIG_IA64) || defined(CONFIG_LOONGARCH)
+#if defined(CONFIG_X86) || defined(CONFIG_IA64) || defined(CONFIG_LOONGARCH) || defined(CONFIG_SW64)
 void acpi_numa_processor_affinity_init (struct acpi_srat_cpu_affinity *pa);
 #else
 static inline void
@@ -1495,6 +1495,11 @@ int find_acpi_cpu_topology(unsigned int cpu, int level);
 int find_acpi_cpu_topology_cluster(unsigned int cpu);
 int find_acpi_cpu_topology_package(unsigned int cpu);
 int find_acpi_cpu_topology_hetero_id(unsigned int cpu);
+int find_acpi_cache_level_from_id(u32 cache_id);
+int acpi_pptt_get_cpus_from_container(u32 acpi_cpu_id, cpumask_t *cpus);
+int acpi_pptt_get_cpumask_from_cache_id(u32 cache_id, cpumask_t *cpus);
+int acpi_pptt_get_cpumask_from_cache_id_and_level(u32 cache_id, u32 cache_level,
+						  cpumask_t *cpus);
 #else
 static inline int acpi_pptt_cpu_is_thread(unsigned int cpu)
 {
@@ -1513,6 +1518,26 @@ static inline int find_acpi_cpu_topology_package(unsigned int cpu)
 	return -EINVAL;
 }
 static inline int find_acpi_cpu_topology_hetero_id(unsigned int cpu)
+{
+	return -EINVAL;
+}
+static inline int find_acpi_cache_level_from_id(u32 cache_id)
+{
+	return -EINVAL;
+}
+static inline int acpi_pptt_get_cpus_from_container(u32 acpi_cpu_id,
+						    cpumask_t *cpus)
+{
+	return -EINVAL;
+}
+static inline int acpi_pptt_get_cpumask_from_cache_id(u32 cache_id,
+						      cpumask_t *cpus)
+{
+	return -EINVAL;
+}
+static inline int acpi_pptt_get_cpumask_from_cache_id_and_level(u32 cache_id,
+								u32 cache_level,
+								cpumask_t *cpus)
 {
 	return -EINVAL;
 }
@@ -1547,5 +1572,9 @@ extern void acpi_device_notify_remove(struct device *dev);
 static inline void acpi_device_notify(struct device *dev) { }
 static inline void acpi_device_notify_remove(struct device *dev) { }
 #endif
+
+struct acpi_pptt_processor *
+acpi_pptt_find_cache_backwards(struct acpi_table_header *table_hdr,
+			       struct acpi_pptt_cache *cache);
 
 #endif	/*_LINUX_ACPI_H*/

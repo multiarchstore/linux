@@ -4,6 +4,8 @@
 
 struct netns_nftables {
 	u8			gencursor;
+
+	CK_KABI_RESERVE(1)
 };
 
 #endif

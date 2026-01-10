@@ -143,6 +143,9 @@ struct cgroup_file {
 	struct kernfs_node *kn;
 	unsigned long notified_at;
 	struct timer_list notify_timer;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 /*
@@ -194,6 +197,11 @@ struct cgroup_subsys_state {
 	/* percpu_ref killing and RCU release */
 	struct work_struct destroy_work;
 	struct rcu_work destroy_rwork;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 
 	/*
 	 * PI: the parent css.	Placed here for cache proximity to following
@@ -297,6 +305,11 @@ struct css_set {
 
 	/* For RCU-protected deletion */
 	struct rcu_head rcu_head;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 struct cgroup_base_stat {
@@ -304,6 +317,11 @@ struct cgroup_base_stat {
 
 #ifdef CONFIG_SCHED_CORE
 	u64 forceidle_sum;
+	u64 forceidle_task_sum;
+#endif
+#if defined(CONFIG_SCHED_ACPU) || defined(CONFIG_SCHED_CORE)
+	u64 sibidle_sum;
+	u64 sibidle_task_sum;
 #endif
 };
 
@@ -368,6 +386,11 @@ struct cgroup_rstat_cpu {
 	 */
 	struct cgroup *updated_children;	/* terminated by self cgroup */
 	struct cgroup *updated_next;		/* NULL iff not on the list */
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 struct cgroup_freezer_state {
@@ -525,6 +548,11 @@ struct cgroup {
 	struct bpf_local_storage __rcu  *bpf_cgrp_storage;
 #endif
 
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+
 	/* All ancestors including self */
 	struct cgroup *ancestors[];
 };
@@ -568,6 +596,11 @@ struct cgroup_root {
 
 	/* The name for this hierarchy - may be empty */
 	char name[MAX_CGROUP_ROOT_NAMELEN];
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /*
@@ -660,6 +693,8 @@ struct cftype {
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lock_class_key	lockdep_key;
 #endif
+
+	CK_KABI_RESERVE(1)
 };
 
 /*
@@ -690,6 +725,11 @@ struct cgroup_subsys {
 	void (*exit)(struct task_struct *task);
 	void (*release)(struct task_struct *task);
 	void (*bind)(struct cgroup_subsys_state *root_css);
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 
 	bool early_init:1;
 
@@ -812,6 +852,8 @@ struct sock_cgroup_data {
 #ifdef CONFIG_CGROUP_NET_PRIO
 	u16		prioidx; /* v1 */
 #endif
+
+	CK_KABI_RESERVE(1)
 };
 
 static inline u16 sock_cgroup_prioidx(const struct sock_cgroup_data *skcd)

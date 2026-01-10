@@ -216,6 +216,7 @@ enum kvm_bus {
 	KVM_PIO_BUS,
 	KVM_VIRTIO_CCW_NOTIFY_BUS,
 	KVM_FAST_MMIO_BUS,
+	KVM_IOCSR_BUS,
 	KVM_NR_BUSES
 };
 
@@ -392,6 +393,8 @@ struct kvm_vcpu {
 	 */
 	struct kvm_memory_slot *last_used_slot;
 	u64 last_used_slot_gen;
+
+	CK_KABI_RESERVE(1)
 };
 
 /*
@@ -588,6 +591,8 @@ struct kvm_memory_slot {
 	u32 flags;
 	short id;
 	u16 as_id;
+
+	CK_KABI_RESERVE(1)
 };
 
 static inline bool kvm_slot_dirty_track_enabled(const struct kvm_memory_slot *slot)
@@ -808,6 +813,8 @@ struct kvm {
 	struct notifier_block pm_notifier;
 #endif
 	char stats_id[KVM_STATS_NAME_SIZE];
+
+	CK_KABI_RESERVE(1)
 };
 
 #define kvm_err(fmt, ...) \
@@ -1766,6 +1773,9 @@ static inline bool kvm_is_error_gpa(struct kvm *kvm, gpa_t gpa)
 enum kvm_stat_kind {
 	KVM_STAT_VM,
 	KVM_STAT_VCPU,
+#ifdef CONFIG_SW64
+	KVM_STAT_DFX_SW64, /* Detail For vcpu stat EXtension */
+#endif
 };
 
 struct kvm_stat_data {
@@ -1895,6 +1905,21 @@ struct _kvm_stats_desc {
 			HALT_POLL_HIST_COUNT),				       \
 	STATS_DESC_IBOOLEAN(VCPU_GENERIC, blocking)
 
+#ifdef CONFIG_SW64
+enum dfx_sw64_stat_kind {
+	DFX_SW64_STAT_U64,
+	DFX_SW64_STAT_CPUTIME,
+};
+
+/* Detail For vcpu stat EXtension debugfs item */
+struct dfx_sw64_kvm_stats_debugfs_item {
+	const char *name;
+	int offset;
+	enum dfx_sw64_stat_kind dfx_kind;
+	struct dentry *dentry;
+};
+extern struct dfx_sw64_kvm_stats_debugfs_item dfx_sw64_debugfs_entries[];
+#endif
 extern struct dentry *kvm_debugfs_dir;
 
 ssize_t kvm_stats_read(char *id, const struct kvm_stats_header *header,

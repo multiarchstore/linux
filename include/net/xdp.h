@@ -64,6 +64,11 @@ struct xdp_rxq_info {
 	struct xdp_mem_info mem;
 	unsigned int napi_id;
 	u32 frag_size;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 } ____cacheline_aligned; /* perf critical, avoid false-sharing */
 
 struct xdp_txq_info {
@@ -175,6 +180,8 @@ struct xdp_frame {
 	struct net_device *dev_rx; /* used by cpumap */
 	u32 frame_sz;
 	u32 flags; /* supported values defined in xdp_buff_flags */
+
+	CK_KABI_RESERVE(1)
 };
 
 static __always_inline bool xdp_frame_has_frags(struct xdp_frame *frame)

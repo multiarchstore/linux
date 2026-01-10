@@ -16,6 +16,7 @@
 #include <linux/device.h>
 #include <linux/fs.h>
 #include <linux/interrupt.h>
+#include <linux/percpu-refcount.h>
 
 struct module;
 struct uio_map;
@@ -74,9 +75,11 @@ struct uio_device {
 	struct fasync_struct    *async_queue;
 	wait_queue_head_t       wait;
 	struct uio_info         *info;
-	struct mutex		info_lock;
 	struct kobject          *map_dir;
 	struct kobject          *portio_dir;
+	struct percpu_ref	info_ref;
+	struct completion       confirm_done;
+	struct completion       free_done;
 };
 
 /**
@@ -109,6 +112,7 @@ struct uio_info {
 	int (*open)(struct uio_info *info, struct inode *inode);
 	int (*release)(struct uio_info *info, struct inode *inode);
 	int (*irqcontrol)(struct uio_info *info, s32 irq_on);
+	long (*ioctl)(struct uio_info *info, unsigned int cmd, unsigned long arg);
 };
 
 extern int __must_check

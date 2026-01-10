@@ -216,6 +216,8 @@ module_param(ple_window_max, uint, 0444);
 int __read_mostly pt_mode = PT_MODE_SYSTEM;
 module_param(pt_mode, int, S_IRUGO);
 
+static u32 zx_ext_vmcs_cap;
+
 static DEFINE_STATIC_KEY_FALSE(vmx_l1d_should_flush);
 static DEFINE_STATIC_KEY_FALSE(vmx_l1d_flush_cond);
 static DEFINE_MUTEX(vmx_l1d_flush_mutex);
@@ -2017,7 +2019,11 @@ static int vmx_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 	case MSR_IA32_UMWAIT_CONTROL:
 		if (!msr_info->host_initiated && !vmx_has_waitpkg(vmx))
 			return 1;
-
+		msr_info->data = vmx->msr_ia32_umwait_control;
+		break;
+	case MSR_ZX_PAUSE_CONTROL:
+		if (!msr_info->host_initiated && !vmx_guest_zxpause_enabled(vmx))
+			return 1;
 		msr_info->data = vmx->msr_ia32_umwait_control;
 		break;
 	case MSR_IA32_SPEC_CTRL:
@@ -2277,7 +2283,15 @@ static int vmx_set_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 		/* The reserved bit 1 and non-32 bit [63:32] should be zero */
 		if (data & (BIT_ULL(1) | GENMASK_ULL(63, 32)))
 			return 1;
+		vmx->msr_ia32_umwait_control = data;
+		break;
+	case MSR_ZX_PAUSE_CONTROL:
+		if (!msr_info->host_initiated && !vmx_guest_zxpause_enabled(vmx))
+			return 1;
 
+		/* The reserved bit 1 and non-32 bit [63:32] should be zero */
+		if (data & (BIT_ULL(1) | GENMASK_ULL(63, 32)))
+			return 1;
 		vmx->msr_ia32_umwait_control = data;
 		break;
 	case MSR_IA32_SPEC_CTRL:
@@ -2734,6 +2748,10 @@ static int setup_vmcs_config(struct vmcs_config *vmcs_conf,
 	vmcs_conf->vmexit_ctrl         = _vmexit_control;
 	vmcs_conf->vmentry_ctrl        = _vmentry_control;
 	vmcs_conf->misc	= misc_msr;
+
+	/* Setup Zhaoxin exec-cntl3 VMCS field. */
+	if (zx_ext_vmcs_cap & MSR_ZX_VMCS_EXEC_CTL3)
+		vmcs_conf->zx_cpu_based_3rd_exec_ctrl |= ZX_TERTIARY_EXEC_GUEST_ZXPAUSE;
 
 #if IS_ENABLED(CONFIG_HYPERV)
 	if (enlightened_vmcs)
@@ -3411,7 +3429,8 @@ static void vmx_load_mmu_pgd(struct kvm_vcpu *vcpu, hpa_t root_hpa,
 			update_guest_cr3 = false;
 		vmx_ept_load_pdptrs(vcpu);
 	} else {
-		guest_cr3 = root_hpa | kvm_get_active_pcid(vcpu);
+		guest_cr3 = root_hpa | kvm_get_active_pcid(vcpu) |
+			    kvm_get_active_cr3_lam_bits(vcpu);
 	}
 
 	if (update_guest_cr3)
@@ -4527,6 +4546,28 @@ static u64 vmx_tertiary_exec_control(struct vcpu_vmx *vmx)
 	return exec_control;
 }
 
+static u32 vmx_zx_tertiary_exec_control(struct vcpu_vmx *vmx)
+{
+	struct kvm_vcpu *vcpu = &vmx->vcpu;
+	u32 exec_control = vmcs_config.zx_cpu_based_3rd_exec_ctrl;
+
+	/*
+	 * Show errors if Qemu wants to enable guest_zxpause while
+	 * vmx not support it.
+	 */
+	if (guest_cpuid_has(vcpu, X86_FEATURE_ZXPAUSE)) {
+		if (!cpu_has_vmx_zxpause())
+			pr_err("VMX not support guest_zxpause!\n");
+		else
+			exec_control |= ZX_TERTIARY_EXEC_GUEST_ZXPAUSE;
+	} else
+		exec_control &= ~ZX_TERTIARY_EXEC_GUEST_ZXPAUSE;
+
+	/* enable other features here */
+
+	return exec_control;
+}
+
 /*
  * Adjust a single secondary execution control bit to intercept/allow an
  * instruction in the guest.  This is usually done based on whether or not a
@@ -4732,6 +4773,11 @@ static void init_vmcs(struct vcpu_vmx *vmx)
 
 	if (cpu_has_secondary_exec_ctrls())
 		secondary_exec_controls_set(vmx, vmx_secondary_exec_control(vmx));
+
+	if (zx_ext_vmcs_cap & MSR_ZX_VMCS_EXEC_CTL3) {
+		zx_tertiary_exec_controls_set(vmx, vmx_zx_tertiary_exec_control(vmx));
+		zx_vmexit_tsc_controls_set(vmx, 0);
+	}
 
 	if (cpu_has_tertiary_exec_ctrls())
 		tertiary_exec_controls_set(vmx, vmx_tertiary_exec_control(vmx));
@@ -5798,7 +5844,7 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 	 * would also use advanced VM-exit information for EPT violations to
 	 * reconstruct the page fault error code.
 	 */
-	if (unlikely(allow_smaller_maxphyaddr && kvm_vcpu_is_illegal_gpa(vcpu, gpa)))
+	if (unlikely(allow_smaller_maxphyaddr && !kvm_vcpu_is_legal_gpa(vcpu, gpa)))
 		return kvm_emulate_instruction(vcpu, 0);
 
 	return kvm_mmu_page_fault(vcpu, gpa, error_code, NULL, 0);
@@ -6266,6 +6312,13 @@ void dump_vmcs(struct kvm_vcpu *vcpu)
 		tertiary_exec_control = vmcs_read64(TERTIARY_VM_EXEC_CONTROL);
 	else
 		tertiary_exec_control = 0;
+
+	pr_err("*** Zhaoxin Specific Fields ***\n");
+	if (zx_ext_vmcs_cap & MSR_ZX_VMCS_EXEC_CTL3) {
+		pr_err("Zhaoxin TertiaryExec Cntl = 0x%016x\n",
+						vmcs_read32(ZX_TERTIARY_VM_EXEC_CONTROL));
+		pr_err("ZXPAUSE Saved TSC = 0x%016llx\n", vmcs_read64(ZXPAUSE_VMEXIT_TSC));
+	}
 
 	pr_err("VMCS %p, last attempted VM-entry on CPU %d\n",
 	       vmx->loaded_vmcs->vmcs, vcpu->arch.last_vmentry_cpu);
@@ -7023,6 +7076,7 @@ static bool vmx_has_emulated_msr(struct kvm *kvm, u32 index)
 		return nested;
 	case MSR_AMD64_VIRT_SPEC_CTRL:
 	case MSR_AMD64_TSC_RATIO:
+	case MSR_AMD64_SEV_ES_GHCB:
 		/* This is AMD only.  */
 		return false;
 	default:
@@ -7696,6 +7750,9 @@ static void nested_vmx_cr_fixed1_bits_update(struct kvm_vcpu *vcpu)
 	cr4_fixed1_update(X86_CR4_UMIP,       ecx, feature_bit(UMIP));
 	cr4_fixed1_update(X86_CR4_LA57,       ecx, feature_bit(LA57));
 
+	entry = kvm_find_cpuid_entry_index(vcpu, 0x7, 1);
+	cr4_fixed1_update(X86_CR4_LAM_SUP,    eax, feature_bit(LAM));
+
 #undef cr4_fixed1_update
 }
 
@@ -7782,12 +7839,18 @@ static void vmx_vcpu_after_set_cpuid(struct kvm_vcpu *vcpu)
 		kvm_governed_feature_check_and_set(vcpu, X86_FEATURE_XSAVES);
 
 	kvm_governed_feature_check_and_set(vcpu, X86_FEATURE_VMX);
+	kvm_governed_feature_check_and_set(vcpu, X86_FEATURE_LAM);
 
 	vmx_setup_uret_msrs(vmx);
 
 	if (cpu_has_secondary_exec_ctrls())
 		vmcs_set_secondary_exec_control(vmx,
 						vmx_secondary_exec_control(vmx));
+
+	if (zx_ext_vmcs_cap & MSR_ZX_VMCS_EXEC_CTL3) {
+		zx_tertiary_exec_controls_set(vmx, vmx_zx_tertiary_exec_control(vmx));
+		zx_vmexit_tsc_controls_set(vmx, 0);
+	}
 
 	if (guest_can_use(vcpu, X86_FEATURE_VMX))
 		vmx->msr_ia32_feature_control_valid_bits |=
@@ -7939,6 +8002,9 @@ static __init void vmx_set_cpu_caps(void)
 
 	if (cpu_has_vmx_waitpkg())
 		kvm_cpu_cap_check_and_set(X86_FEATURE_WAITPKG);
+
+	if (cpu_has_vmx_zxpause())
+		kvm_cpu_cap_check_and_set(X86_FEATURE_ZXPAUSE);
 }
 
 static void vmx_request_immediate_exit(struct kvm_vcpu *vcpu)
@@ -8248,6 +8314,50 @@ static void vmx_vm_destroy(struct kvm *kvm)
 	free_pages((unsigned long)kvm_vmx->pid_table, vmx_get_pid_table_order(kvm));
 }
 
+/*
+ * Note, the SDM states that the linear address is masked *after* the modified
+ * canonicality check, whereas KVM masks (untags) the address and then performs
+ * a "normal" canonicality check.  Functionally, the two methods are identical,
+ * and when the masking occurs relative to the canonicality check isn't visible
+ * to software, i.e. KVM's behavior doesn't violate the SDM.
+ */
+gva_t vmx_get_untagged_addr(struct kvm_vcpu *vcpu, gva_t gva, unsigned int flags)
+{
+	int lam_bit;
+	unsigned long cr3_bits;
+
+	if (flags & (X86EMUL_F_FETCH | X86EMUL_F_IMPLICIT | X86EMUL_F_INVLPG))
+		return gva;
+
+	if (!is_64_bit_mode(vcpu))
+		return gva;
+
+	/*
+	 * Bit 63 determines if the address should be treated as user address
+	 * or a supervisor address.
+	 */
+	if (!(gva & BIT_ULL(63))) {
+		cr3_bits = kvm_get_active_cr3_lam_bits(vcpu);
+		if (!(cr3_bits & (X86_CR3_LAM_U57 | X86_CR3_LAM_U48)))
+			return gva;
+
+		/* LAM_U48 is ignored if LAM_U57 is set. */
+		lam_bit = cr3_bits & X86_CR3_LAM_U57 ? 56 : 47;
+	} else {
+		if (!kvm_is_cr4_bit_set(vcpu, X86_CR4_LAM_SUP))
+			return gva;
+
+		lam_bit = kvm_is_cr4_bit_set(vcpu, X86_CR4_LA57) ? 56 : 47;
+	}
+
+	/*
+	 * Untag the address by sign-extending the lam_bit, but NOT to bit 63.
+	 * Bit 63 is retained from the raw virtual address so that untagging
+	 * doesn't change a user access to a supervisor access, and vice versa.
+	 */
+	return (sign_extend64(gva, lam_bit) & ~BIT_ULL(63)) | (gva & BIT_ULL(63));
+}
+
 static struct kvm_x86_ops vmx_x86_ops __initdata = {
 	.name = KBUILD_MODNAME,
 
@@ -8388,6 +8498,8 @@ static struct kvm_x86_ops vmx_x86_ops __initdata = {
 	.complete_emulated_msr = kvm_complete_insn_gp,
 
 	.vcpu_deliver_sipi_vector = kvm_vcpu_deliver_sipi_vector,
+
+	.get_untagged_addr = vmx_get_untagged_addr,
 };
 
 static unsigned int vmx_handle_intel_pt_intr(void)
@@ -8462,6 +8574,12 @@ static __init int hardware_setup(void)
 	unsigned long host_bndcfgs;
 	struct desc_ptr dt;
 	int r;
+	u32 ign;
+
+	/* Caches Zhaoxin extend VMCS capabilities. */
+	if (boot_cpu_data.x86_vendor == X86_VENDOR_CENTAUR ||
+	    boot_cpu_data.x86_vendor == X86_VENDOR_ZHAOXIN)
+		rdmsr_safe(MSR_ZX_EXT_VMCS_CAPS, &zx_ext_vmcs_cap, &ign);
 
 	store_idt(&dt);
 	host_idt_base = dt.address;

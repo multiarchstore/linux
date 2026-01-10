@@ -142,6 +142,7 @@ static inline unsigned long decode_bar(struct pci_dev *dev, u32 bar)
 
 	flags = bar & ~PCI_BASE_ADDRESS_MEM_MASK;
 	flags |= IORESOURCE_MEM;
+
 	if (flags & PCI_BASE_ADDRESS_MEM_PREFETCH)
 		flags |= IORESOURCE_PREFETCH;
 
@@ -2693,8 +2694,22 @@ int pci_scan_slot(struct pci_bus *bus, int devfn)
 			 * a hypervisor that passes through individual PCI
 			 * functions.
 			 */
+			#ifdef CONFIG_LOONGARCH
+			if (bus->number == 0 && devfn == 0x30) {
+				u32 l;
+
+				if (!pci_bus_read_dev_vendor_id(bus, devfn + 1,
+					&l, 60*1000))
+					break;
+
+				if ((l & 0xffff) != PCI_VENDOR_ID_LOONGSON)
+					break;
+			} else if (!hypervisor_isolated_pci_functions())
+				break;
+			#else
 			if (!hypervisor_isolated_pci_functions())
 				break;
+			#endif
 		}
 		fn = next_fn(bus, dev, fn);
 	} while (fn >= 0);

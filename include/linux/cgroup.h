@@ -121,6 +121,8 @@ void cgroup_file_show(struct cgroup_file *cfile, bool show);
 int cgroupstats_build(struct cgroupstats *stats, struct dentry *dentry);
 int proc_cgroup_show(struct seq_file *m, struct pid_namespace *ns,
 		     struct pid *pid, struct task_struct *tsk);
+extern struct cgroup_subsys_state *global_cgroup_css(struct cgroup *cgrp,
+							int ssid);
 
 void cgroup_fork(struct task_struct *p);
 extern int cgroup_can_fork(struct task_struct *p,
@@ -854,5 +856,17 @@ static inline void cgroup_bpf_get(struct cgroup *cgrp) {}
 static inline void cgroup_bpf_put(struct cgroup *cgrp) {}
 
 #endif /* CONFIG_CGROUP_BPF */
+
+#ifdef CONFIG_SCHED_SLI
+void cpuacct_cpuset_changed(struct cgroup *cgrp,
+		struct cpumask *effective, struct cpumask *new_added);
+void cgroup_idle_end(struct sched_entity *se);
+void cgroup_idle_start(struct sched_entity *se);
+#else
+static inline void cpuacct_cpuset_changed(struct cgroup *cgrp,
+		struct cpumask *effective, struct cpumask *new_added) { }
+static inline void cgroup_idle_end(struct sched_entity *se) { }
+static inline void cgroup_idle_start(struct sched_entity *se) { }
+#endif
 
 #endif /* _LINUX_CGROUP_H */

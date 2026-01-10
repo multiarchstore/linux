@@ -206,6 +206,8 @@ enum mapping_flags {
 	AS_RELEASE_ALWAYS,	/* Call ->release_folio(), even if no private data */
 	AS_STABLE_WRITES,	/* must wait for writeback before modifying
 				   folio contents */
+
+	AS_FSDAX_NORMAP = 30,
 };
 
 /**
@@ -1283,6 +1285,11 @@ struct readahead_control {
 	unsigned int _batch_count;
 	bool _workingset;
 	unsigned long _pflags;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 #define DEFINE_READAHEAD(ractl, f, r, m, i)				\

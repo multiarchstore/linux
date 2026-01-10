@@ -70,10 +70,12 @@ void xfs_inode_clear_eofblocks_tag(struct xfs_inode *ip);
 void xfs_inode_set_cowblocks_tag(struct xfs_inode *ip);
 void xfs_inode_clear_cowblocks_tag(struct xfs_inode *ip);
 
+int xfs_inodegc_inactivate(struct xfs_inode *ip);
 void xfs_blockgc_worker(struct work_struct *work);
 void xfs_blockgc_stop(struct xfs_mount *mp);
 void xfs_blockgc_start(struct xfs_mount *mp);
 
+void xfs_inodegc_reflink_opt_worker(struct work_struct *work);
 void xfs_inodegc_worker(struct work_struct *work);
 void xfs_inodegc_push(struct xfs_mount *mp);
 int xfs_inodegc_flush(struct xfs_mount *mp);

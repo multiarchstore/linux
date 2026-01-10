@@ -129,9 +129,13 @@ static umode_t psp_firmware_is_visible(struct kobject *kobj, struct attribute *a
 
 	if (!psp)
 		return 0;
-
+#ifdef CONFIG_X86
+	if (attr == &dev_attr_bootloader_version.attr &&
+	    psp->vdata->bootloader_info_reg && boot_cpu_data.x86_vendor != X86_VENDOR_HYGON)
+#else
 	if (attr == &dev_attr_bootloader_version.attr &&
 	    psp->vdata->bootloader_info_reg)
+#endif
 		val = ioread32(psp->io_regs + psp->vdata->bootloader_info_reg);
 
 	if (attr == &dev_attr_tee_version.attr &&
@@ -417,6 +421,12 @@ static const struct sev_vdata sevv2 = {
 	.cmdbuff_addr_hi_reg	= 0x109e4,	/* C2PMSG_57 */
 };
 
+static const struct sev_vdata csvv1 = {
+	.cmdresp_reg		= 0x10580,
+	.cmdbuff_addr_lo_reg	= 0x105e0,
+	.cmdbuff_addr_hi_reg	= 0x105e4,
+};
+
 static const struct tee_vdata teev1 = {
 	.cmdresp_reg		= 0x10544,	/* C2PMSG_17 */
 	.cmdbuff_addr_lo_reg	= 0x10548,	/* C2PMSG_18 */
@@ -453,6 +463,11 @@ static const struct psp_vdata pspv1 = {
 	.feature_reg		= 0x105fc,	/* C2PMSG_63 */
 	.inten_reg		= 0x10610,	/* P2CMSG_INTEN */
 	.intsts_reg		= 0x10614,	/* P2CMSG_INTSTS */
+#ifdef CONFIG_HYGON_PSP2CPU_CMD
+	.p2c_cmdresp_reg	= 0x105e8,
+	.p2c_cmdbuff_addr_lo_reg = 0x105ec,
+	.p2c_cmdbuff_addr_hi_reg = 0x105f0,
+#endif
 };
 
 static const struct psp_vdata pspv2 = {
@@ -496,6 +511,18 @@ static const struct psp_vdata pspv6 = {
 	.feature_reg            = 0x109fc,	/* C2PMSG_63 */
 	.inten_reg              = 0x10510,	/* P2CMSG_INTEN */
 	.intsts_reg             = 0x10514,	/* P2CMSG_INTSTS */
+};
+
+static const struct psp_vdata psp_csvv1 = {
+	.sev			= &csvv1,
+	.feature_reg		= 0x105fc,
+	.inten_reg		= 0x10670,
+	.intsts_reg		= 0x10674,
+#ifdef CONFIG_HYGON_PSP2CPU_CMD
+	.p2c_cmdresp_reg        = 0x105e8,
+	.p2c_cmdbuff_addr_lo_reg = 0x105ec,
+	.p2c_cmdbuff_addr_hi_reg = 0x105f0,
+#endif
 };
 
 #endif
@@ -564,6 +591,30 @@ static const struct sp_dev_vdata dev_vdata[] = {
 		.psp_vdata = &pspv6,
 #endif
 	},
+	{	/* 9 */
+		.bar = 2,
+#ifdef CONFIG_CRYPTO_DEV_SP_CCP
+		.ccp_vdata = &ccpv5a_hygon,
+#endif
+#ifdef CONFIG_CRYPTO_DEV_SP_PSP
+		.psp_vdata = &pspv1,
+#endif
+	},
+	{	/* 10 */
+		.bar = 2,
+#ifdef CONFIG_CRYPTO_DEV_SP_CCP
+		.ccp_vdata = &ccpv5b_hygon,
+#endif
+	},
+	{	/* 11 */
+		.bar = 2,
+#ifdef CONFIG_CRYPTO_DEV_SP_CCP
+		.ccp_vdata = &ccpv5a_hygon,
+#endif
+#ifdef CONFIG_CRYPTO_DEV_SP_PSP
+		.psp_vdata = &psp_csvv1,
+#endif
+	},
 };
 static const struct pci_device_id sp_pci_table[] = {
 	{ PCI_VDEVICE(AMD, 0x1537), (kernel_ulong_t)&dev_vdata[0] },
@@ -576,6 +627,11 @@ static const struct pci_device_id sp_pci_table[] = {
 	{ PCI_VDEVICE(AMD, 0x1649), (kernel_ulong_t)&dev_vdata[6] },
 	{ PCI_VDEVICE(AMD, 0x17E0), (kernel_ulong_t)&dev_vdata[7] },
 	{ PCI_VDEVICE(AMD, 0x156E), (kernel_ulong_t)&dev_vdata[8] },
+	{ PCI_VDEVICE(HYGON, 0x1456), (kernel_ulong_t)&dev_vdata[9] },
+	{ PCI_VDEVICE(HYGON, 0x1468), (kernel_ulong_t)&dev_vdata[10] },
+	{ PCI_VDEVICE(HYGON, 0x1486), (kernel_ulong_t)&dev_vdata[11] },
+	{ PCI_VDEVICE(HYGON, 0x14b8), (kernel_ulong_t)&dev_vdata[10] },
+	{ PCI_VDEVICE(HYGON, 0x14a6), (kernel_ulong_t)&dev_vdata[11] },
 	/* Last entry must be zero */
 	{ 0, }
 };

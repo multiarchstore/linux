@@ -131,6 +131,9 @@
 
 #include "internal.h"
 
+/* enable context readahead default */
+int sysctl_enable_context_readahead = 1;
+
 /*
  * Initialise a struct file's readahead state.  Assumes that the caller has
  * memset *ra to zero.
@@ -499,13 +502,13 @@ void page_cache_ra_order(struct readahead_control *ractl,
 
 	limit = min(limit, index + ra->size - 1);
 
-	if (new_order < MAX_PAGECACHE_ORDER) {
+	if (new_order < MAX_PAGECACHE_ORDER)
 		new_order += 2;
-		if (new_order > MAX_PAGECACHE_ORDER)
-			new_order = MAX_PAGECACHE_ORDER;
-		while ((1 << new_order) > ra->size)
-			new_order--;
-	}
+
+	if (new_order > MAX_PAGECACHE_ORDER)
+		new_order = MAX_PAGECACHE_ORDER;
+	while ((1 << new_order) > ra->size)
+		new_order--;
 
 	/* See comment in page_cache_ra_unbounded() */
 	nofs = memalloc_nofs_save();
@@ -634,9 +637,11 @@ static void ondemand_readahead(struct readahead_control *ractl,
 	 * Query the page cache and look for the traces(cached history pages)
 	 * that a sequential stream would leave behind.
 	 */
-	if (try_context_readahead(ractl->mapping, ra, index, req_size,
-			max_pages))
+	if (sysctl_enable_context_readahead &&
+	    try_context_readahead(ractl->mapping, ra, index, req_size,
+			max_pages)) {
 		goto readit;
+	}
 
 	/*
 	 * standalone, small random read

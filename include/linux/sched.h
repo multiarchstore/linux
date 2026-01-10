@@ -11,6 +11,7 @@
 
 #include <asm/current.h>
 
+#include <linux/ck_kabi.h>
 #include <linux/pid.h>
 #include <linux/sem.h>
 #include <linux/shm.h>
@@ -133,6 +134,10 @@ struct user_event_mm;
 #define task_is_traced(task)		((READ_ONCE(task->jobctl) & JOBCTL_TRACED) != 0)
 #define task_is_stopped(task)		((READ_ONCE(task->jobctl) & JOBCTL_STOPPED) != 0)
 #define task_is_stopped_or_traced(task)	((READ_ONCE(task->jobctl) & (JOBCTL_STOPPED | JOBCTL_TRACED)) != 0)
+#define task_contributes_to_load(task)					\
+		((READ_ONCE((task)->__state) & TASK_UNINTERRUPTIBLE) != 0 && \
+		(READ_ONCE((task)->__state) & TASK_FROZEN) == 0 && \
+		(READ_ONCE((task)->__state) & TASK_NOLOAD) == 0)
 
 /*
  * Special states are those that do not use the normal wait-loop pattern. See
@@ -389,6 +394,11 @@ struct sched_info {
 	unsigned long long		last_queued;
 
 #endif /* CONFIG_SCHED_INFO */
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /*
@@ -408,6 +418,11 @@ struct sched_info {
 struct load_weight {
 	unsigned long			weight;
 	u32				inv_weight;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /**
@@ -501,6 +516,11 @@ struct sched_avg {
 	unsigned long			runnable_avg;
 	unsigned long			util_avg;
 	struct util_est			util_est;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 } ____cacheline_aligned;
 
 struct sched_statistics {
@@ -509,6 +529,8 @@ struct sched_statistics {
 	u64				wait_max;
 	u64				wait_count;
 	u64				wait_sum;
+	u64				parent_wait_sum_base;
+	u64				parent_wait_contrib;
 	u64				iowait_count;
 	u64				iowait_sum;
 
@@ -541,8 +563,19 @@ struct sched_statistics {
 
 #ifdef CONFIG_SCHED_CORE
 	u64				core_forceidle_sum;
+	u64				core_forceidle_task_sum;
 #endif
+#if defined(CONFIG_SCHED_CORE) || defined(CONFIG_SCHED_ACPU)
+	u64				core_sibidle_sum;
+	u64				core_sibidle_task_sum;
+#endif
+
 #endif /* CONFIG_SCHEDSTATS */
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 } ____cacheline_aligned;
 
 struct sched_entity {
@@ -561,6 +594,20 @@ struct sched_entity {
 	u64				vruntime;
 	s64				vlag;
 	u64				slice;
+
+	/* irq time is included */
+	u64				exec_start_raw;
+	u64				sum_exec_raw;
+	u64				cg_idle_start;
+	u64				cg_idle_sum;
+	u64				cg_init_time;
+	u64				cg_nr_iowait;
+	u64				cg_iowait_sum;
+	u64				cg_iowait_start;
+	u64				cg_ineffective_sum;
+	u64				cg_ineffective_start;
+	seqlock_t			idle_seqlock;
+	spinlock_t			iowait_lock;
 
 	u64				nr_migrations;
 
@@ -584,6 +631,18 @@ struct sched_entity {
 	 */
 	struct sched_avg		avg;
 #endif
+#if defined(CONFIG_SCHED_CORE) && defined(CONFIG_CFS_BANDWIDTH)
+	unsigned int			ht_ratio;
+#endif
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 };
 
 struct sched_rt_entity {
@@ -602,6 +661,11 @@ struct sched_rt_entity {
 	/* rq "owned" by this entity/group: */
 	struct rt_rq			*my_q;
 #endif
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 } __randomize_layout;
 
 struct sched_dl_entity {
@@ -675,6 +739,11 @@ struct sched_dl_entity {
 	 */
 	struct sched_dl_entity *pi_se;
 #endif
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 #ifdef CONFIG_UCLAMP_TASK
@@ -1536,6 +1605,22 @@ struct task_struct {
 	struct user_event_mm		*user_event_mm;
 #endif
 
+	int wait_res_type;
+	union {
+		struct folio		*wait_folio;
+		struct bio		*wait_bio;
+	};
+	unsigned long wait_moment;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
+
 	/*
 	 * New fields for task_struct should be added above here, so that
 	 * they are included in the randomized portion of task_struct.
@@ -1552,6 +1637,36 @@ struct task_struct {
 	 * Do not put anything below here!
 	 */
 };
+
+enum {
+	TASK_WAIT_FOLIO = 1,
+	TASK_WAIT_BIO,
+};
+
+static inline void task_set_wait_res(int type, void *res)
+{
+	switch (type) {
+	case TASK_WAIT_FOLIO:
+		current->wait_folio = (struct folio *)res;
+		break;
+	case TASK_WAIT_BIO:
+		current->wait_bio = (struct bio *)res;
+		break;
+	default:
+		current->wait_folio = NULL;
+		break;
+	}
+
+	current->wait_res_type = type;
+	current->wait_moment = jiffies;
+}
+
+static inline void task_clear_wait_res(void)
+{
+	current->wait_folio = NULL;
+	current->wait_res_type = 0;
+	current->wait_moment = 0;
+}
 
 static inline struct pid *task_pid(struct task_struct *task)
 {
@@ -2456,5 +2571,75 @@ static inline int sched_core_idle_cpu(int cpu) { return idle_cpu(cpu); }
 #endif
 
 extern void sched_set_stop_task(int cpu, struct task_struct *stop);
+
+struct cpuacct_usage_result {
+	u64 user, nice, system, irq, softirq;
+	u64 steal, iowait, idle, guest, guest_nice;
+};
+
+enum rich_container_source {
+	RICH_CONTAINER_REAPER,
+	RICH_CONTAINER_CURRENT,
+};
+
+#ifdef CONFIG_RICH_CONTAINER
+void rich_container_source(enum rich_container_source *from);
+bool child_cpuacct(struct task_struct *tsk);
+void rich_container_get_usage(enum rich_container_source from,
+		struct task_struct *reaper, int cpu,
+		struct cpuacct_usage_result *res);
+unsigned long rich_container_get_running(enum rich_container_source from,
+		struct task_struct *reaper, int cpu);
+void rich_container_get_avenrun(enum rich_container_source from,
+		struct task_struct *reaper, unsigned long *loads,
+		unsigned long offset, int shift, bool running);
+bool check_rich_container(unsigned int cpu, unsigned int *index,
+		bool *rich_container, unsigned int *total);
+
+void rich_container_get_cpus(struct task_struct *tsk, struct cpumask *pmask);
+
+#else /* CONFIG_RICH_CONTAINER */
+static inline void
+rich_container_source(enum rich_container_source *from)
+{
+}
+
+static inline void
+rich_container_get_usage(enum rich_container_source from,
+		struct task_struct *reaper, int cpu,
+		struct cpuacct_usage_result *res)
+{
+}
+
+static inline unsigned long
+rich_container_get_running(enum rich_container_source from,
+		struct task_struct *reaper, int cpu)
+{
+	return 0;
+}
+
+static inline void rich_container_get_avenrun(enum rich_container_source from,
+		struct task_struct *reaper, unsigned long *loads,
+		unsigned long offset, int shift, bool running)
+{
+}
+
+static inline bool check_rich_container(unsigned int cpu, unsigned int *index,
+		bool *rich_container, unsigned int *total)
+{
+	return false;
+}
+
+static inline
+void rich_container_get_cpus(struct task_struct *tsk, struct cpumask *pmask)
+{
+}
+#endif
+
+#ifdef CONFIG_SCHED_SLI
+void create_rich_container_reaper(struct task_struct *tsk);
+#else
+static inline void create_rich_container_reaper(struct task_struct *tsk) { }
+#endif
 
 #endif

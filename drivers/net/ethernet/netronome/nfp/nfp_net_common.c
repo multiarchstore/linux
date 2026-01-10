@@ -2705,6 +2705,11 @@ int nfp_net_init(struct nfp_net *nn)
 	if (nn->cap_w1 & NFP_NET_CFG_CTRL_MCAST_FILTER)
 		nn->dp.ctrl_w1 |= NFP_NET_CFG_CTRL_MCAST_FILTER;
 
+	/* Multi-PF is already enabled during pre-init, preserve control bit */
+	if (nn->cap_w1 & NFP_NET_CFG_CTRL_MULTI_PF)
+		nn->dp.ctrl_w1 |= (nn_readl(nn, NFP_NET_CFG_CTRL_WORD1) &
+				   NFP_NET_CFG_CTRL_MULTI_PF);
+
 	/* Stash the re-configuration queue away.  First odd queue in TX Bar */
 	nn->qcp_cfg = nn->tx_bar + NFP_QCP_QUEUE_ADDR_SZ;
 

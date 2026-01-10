@@ -83,6 +83,8 @@ struct netns_xfrm {
 
 	spinlock_t xfrm_policy_lock;
 	struct mutex xfrm_cfg_mutex;
+
+	CK_KABI_RESERVE(1)
 };
 
 #endif

@@ -41,6 +41,8 @@ struct throtl_service_queue {
 	 */
 	struct list_head	queued[2];	/* throtl_qnode [READ/WRITE] */
 	unsigned int		nr_queued[2];	/* number of queued bios */
+	long			nr_queued_bytes[2]; /* number of queued bytes */
+	wait_queue_head_t	wait[2];
 
 	/*
 	 * RB tree of active children throtl_grp's, which are sorted by
@@ -150,6 +152,16 @@ struct throtl_grp {
 
 	struct blkg_rwstat stat_bytes;
 	struct blkg_rwstat stat_ios;
+	/* total time spent on lower layer: scheduler, device and others */
+	struct blkg_rwstat service_time;
+	/* total time spent on block throttle */
+	struct blkg_rwstat wait_time;
+	/* total IOs completed */
+	struct blkg_rwstat completed;
+	/* total bytes throttled */
+	struct blkg_rwstat total_bytes_queued;
+	/* total IOs throttled */
+	struct blkg_rwstat total_io_queued;
 };
 
 extern struct blkcg_policy blkcg_policy_throtl;
@@ -171,13 +183,18 @@ static inline struct throtl_grp *blkg_to_tg(struct blkcg_gq *blkg)
 static inline int blk_throtl_init(struct gendisk *disk) { return 0; }
 static inline void blk_throtl_exit(struct gendisk *disk) { }
 static inline void blk_throtl_register(struct gendisk *disk) { }
-static inline bool blk_throtl_bio(struct bio *bio) { return false; }
+static inline bool blk_throtl_bio(struct bio *bio, wait_queue_head_t **waitq,
+				wait_queue_entry_t *wait)
+{
+	return false;
+}
 static inline void blk_throtl_cancel_bios(struct gendisk *disk) { }
 #else /* CONFIG_BLK_DEV_THROTTLING */
 int blk_throtl_init(struct gendisk *disk);
 void blk_throtl_exit(struct gendisk *disk);
 void blk_throtl_register(struct gendisk *disk);
-bool __blk_throtl_bio(struct bio *bio);
+bool __blk_throtl_bio(struct bio *bio, wait_queue_head_t **waitq,
+				 wait_queue_entry_t *wait);
 void blk_throtl_cancel_bios(struct gendisk *disk);
 
 static inline bool blk_should_throtl(struct bio *bio)
@@ -204,13 +221,14 @@ static inline bool blk_should_throtl(struct bio *bio)
 	return false;
 }
 
-static inline bool blk_throtl_bio(struct bio *bio)
+static inline bool blk_throtl_bio(struct bio *bio, wait_queue_head_t **waitq,
+				 wait_queue_entry_t *wait)
 {
 
 	if (!blk_should_throtl(bio))
 		return false;
 
-	return __blk_throtl_bio(bio);
+	return __blk_throtl_bio(bio, waitq, wait);
 }
 #endif /* CONFIG_BLK_DEV_THROTTLING */
 

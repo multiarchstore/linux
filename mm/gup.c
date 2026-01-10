@@ -503,6 +503,12 @@ static struct page *follow_page_pte(struct vm_area_struct *vma,
 			 (FOLL_PIN | FOLL_GET)))
 		return ERR_PTR(-EINVAL);
 
+	if (is_pmd_transient(*pmd)) {
+		fixup_pmd(vma, pmd, address);
+		if (is_pmd_transient(*pmd))
+			return no_page_table(vma, flags);
+	}
+
 	ptep = pte_offset_map_lock(mm, pmd, address, &ptl);
 	if (!ptep)
 		return no_page_table(vma, flags);
@@ -1975,7 +1981,7 @@ static unsigned long collect_longterm_unpinnable_pages(
 			continue;
 		}
 
-		if (!folio_test_lru(folio) && drain_allow) {
+		if (drain_allow) {
 			lru_add_drain_all();
 			drain_allow = false;
 		}
@@ -2575,6 +2581,9 @@ static int gup_pte_range(pmd_t pmd, pmd_t *pmdp, unsigned long addr,
 	struct dev_pagemap *pgmap = NULL;
 	int nr_start = *nr, ret = 0;
 	pte_t *ptep, *ptem;
+
+	if (is_pmd_transient(pmd))
+		return 0;
 
 	ptem = ptep = pte_offset_map(&pmd, addr);
 	if (!ptep)

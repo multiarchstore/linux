@@ -165,6 +165,8 @@ enum {
  * Only one task is allowed to submit requests
  */
 #define IORING_SETUP_SINGLE_ISSUER	(1U << 12)
+#define IORING_SETUP_IDLE_US		(1U << 30) /* unit of thread_idle is macrosecond */
+#define IORING_SETUP_SQPOLL_PERCPU	(1U << 31) /* percpu SQ poll thread */
 
 /*
  * Defer running task work to get events.
@@ -466,6 +468,7 @@ struct io_cqring_offsets {
 #define IORING_ENTER_SQ_WAIT		(1U << 2)
 #define IORING_ENTER_EXT_ARG		(1U << 3)
 #define IORING_ENTER_REGISTERED_RING	(1U << 4)
+#define IORING_ENTER_SQ_SUBMIT_ON_IDLE	(1U << 31)
 
 /*
  * Passed in for io_uring_setup(2). Copied back with updated info on success

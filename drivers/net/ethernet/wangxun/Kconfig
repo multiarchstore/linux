@@ -1,6 +1,5 @@
-# SPDX-License-Identifier: GPL-2.0-only
 #
-# Wangxun network device configuration
+# WangXun network device configuration
 #
 
 config NET_VENDOR_WANGXUN
@@ -16,16 +15,10 @@ config NET_VENDOR_WANGXUN
 
 if NET_VENDOR_WANGXUN
 
-config LIBWX
-	tristate
-	select PAGE_POOL
-	help
-	Common library for Wangxun(R) Ethernet drivers.
-
 config NGBE
-	tristate "Wangxun(R) GbE PCI Express adapters support"
+	tristate "WangXun(R) PCI-Express Gigabit Ethernet support"
+	select PAGE_POOL
 	depends on PCI
-	select LIBWX
 	select PHYLIB
 	help
 	  This driver supports Wangxun(R) GbE PCI Express family of
@@ -38,9 +31,10 @@ config NGBE
 	  will be called ngbe.
 
 config TXGBE
-	tristate "Wangxun(R) 10GbE PCI Express adapters support"
+	tristate "WangXun(R) 10GbE PCI Express adapters support"
 	depends on PCI
 	depends on COMMON_CLK
+	select PAGE_POOL
 	select MARVELL_10G_PHY
 	select REGMAP
 	select I2C
@@ -51,7 +45,6 @@ config TXGBE
 	select GPIOLIB
 	select GPIOLIB_IRQCHIP
 	select PCS_XPCS
-	select LIBWX
 	help
 	  This driver supports Wangxun(R) 10GbE PCI Express family of
 	  adapters.

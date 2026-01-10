@@ -38,6 +38,7 @@
 enum kfence_object_state {
 	KFENCE_OBJECT_UNUSED,		/* Object is unused. */
 	KFENCE_OBJECT_ALLOCATED,	/* Object is currently allocated. */
+	KFENCE_OBJECT_RCU_FREEING,	/* Object was allocated, and then being freed by rcu. */
 	KFENCE_OBJECT_FREED,		/* Object was allocated, and then freed. */
 };
 
@@ -100,33 +101,11 @@ struct kfence_metadata {
 #ifdef CONFIG_MEMCG
 	struct obj_cgroup *objcg;
 #endif
+	struct kfence_pool_area *kpa;
 };
 
-#define KFENCE_METADATA_SIZE PAGE_ALIGN(sizeof(struct kfence_metadata) * \
-					CONFIG_KFENCE_NUM_OBJECTS)
-
-extern struct kfence_metadata *kfence_metadata;
-
-static inline struct kfence_metadata *addr_to_metadata(unsigned long addr)
-{
-	long index;
-
-	/* The checks do not affect performance; only called from slow-paths. */
-
-	if (!is_kfence_address((void *)addr))
-		return NULL;
-
-	/*
-	 * May be an invalid index if called with an address at the edge of
-	 * __kfence_pool, in which case we would report an "invalid access"
-	 * error.
-	 */
-	index = (addr - (unsigned long)__kfence_pool) / (PAGE_SIZE * 2) - 1;
-	if (index < 0 || index >= CONFIG_KFENCE_NUM_OBJECTS)
-		return NULL;
-
-	return &kfence_metadata[index];
-}
+extern bool kfence_panic_on_fault;
+DECLARE_STATIC_KEY_FALSE(kfence_short_canary);
 
 /* KFENCE error types for report generation. */
 enum kfence_error_type {
@@ -141,5 +120,64 @@ void kfence_report_error(unsigned long address, bool is_write, struct pt_regs *r
 			 const struct kfence_metadata *meta, enum kfence_error_type type);
 
 void kfence_print_object(struct seq_file *seq, const struct kfence_metadata *meta);
+void kfence_disable(void);
+extern void __free_pages_core(struct page *page, unsigned int order);
+
+extern struct rb_root kfence_pool_root;
+#define kfence_rbentry(cur) rb_entry((cur), struct kfence_pool_area, rb_node)
+#define kfence_for_each_area(kpa, iter)			\
+	for ((iter) = rb_first(&kfence_pool_root);	\
+	     (iter) && ((kpa) = kfence_rbentry((iter)));\
+	     (iter) = rb_next((iter)))
+
+/**
+ * get_kfence_pool_area() - find the kfence pool area of the address
+ * @addr: address to check
+ *
+ * Return: the kfence pool area, NULL if not a kfence address
+ */
+static inline struct kfence_pool_area *get_kfence_pool_area(const void *addr)
+{
+	struct rb_node *cur;
+	struct kfence_pool_area *res = NULL;
+
+	for (cur = kfence_pool_root.rb_node; cur;) {
+		struct kfence_pool_area *kpa = kfence_rbentry(cur);
+
+		if ((unsigned long)addr < (unsigned long)kpa->addr)
+			cur = cur->rb_left;
+		else {
+			res = kpa;
+			cur = cur->rb_right;
+		}
+	}
+
+	return is_kfence_address_area(addr, res) ? res : NULL;
+}
+
+static inline struct kfence_metadata *addr_to_metadata(unsigned long addr)
+{
+	long index;
+	struct kfence_metadata *kfence_metadata;
+	struct kfence_pool_area *kpa = get_kfence_pool_area((void *)addr);
+
+	/* The checks do not affect performance; only called from slow-paths. */
+
+	if (!kpa)
+		return NULL;
+
+	kfence_metadata = kpa->meta;
+
+	/*
+	 * May be an invalid index if called with an address at the edge of
+	 * __kfence_pool, in which case we would report an "invalid access"
+	 * error.
+	 */
+	index = (addr - (unsigned long)kpa->addr) / (PAGE_SIZE * 2) - 1;
+	if (index < 0 || index >= kpa->nr_objects)
+		return NULL;
+
+	return &kfence_metadata[index];
+}
 
 #endif /* MM_KFENCE_KFENCE_H */

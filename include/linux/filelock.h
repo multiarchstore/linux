@@ -31,6 +31,9 @@ struct file_lock;
 struct file_lock_operations {
 	void (*fl_copy_lock)(struct file_lock *, struct file_lock *);
 	void (*fl_release_private)(struct file_lock *);
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 struct lock_manager_operations {
@@ -45,6 +48,11 @@ struct lock_manager_operations {
 	bool (*lm_breaker_owns_lease)(struct file_lock *);
 	bool (*lm_lock_expirable)(struct file_lock *cfl);
 	void (*lm_expire_lock)(void);
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 struct lock_manager {
@@ -124,6 +132,8 @@ struct file_lock {
 			struct inode *inode;
 		} ceph;
 	} fl_u;
+
+	CK_KABI_RESERVE(1)
 } __randomize_layout;
 
 struct file_lock_context {

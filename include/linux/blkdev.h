@@ -110,6 +110,9 @@ struct blk_integrity {
 	unsigned char				tuple_size;
 	unsigned char				interval_exp;
 	unsigned char				tag_size;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 typedef unsigned int __bitwise blk_mode_t;
@@ -207,6 +210,11 @@ struct gendisk {
 	 * devices that do not have multiple independent access ranges.
 	 */
 	struct blk_independent_access_ranges *ia_ranges;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 static inline bool disk_live(struct gendisk *disk)
@@ -337,6 +345,11 @@ struct queue_limits {
 	 * due to possible offsets.
 	 */
 	unsigned int		dma_alignment;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 typedef int (*report_zones_cb)(struct blk_zone *zone, unsigned int idx,
@@ -387,6 +400,12 @@ struct blk_independent_access_ranges {
 	unsigned int				nr_ia_ranges;
 	struct blk_independent_access_range	ia_range[];
 };
+
+/*
+ * default request hang threshold, unit is millisecond. If one request does
+ * not complete in this threashold time, consider this request as hang.
+ */
+#define BLK_REQ_HANG_THRESHOLD	5000
 
 struct request_queue {
 	struct request		*last_merge;
@@ -464,6 +483,7 @@ struct request_queue {
 #endif
 
 	unsigned int		rq_timeout;
+	unsigned int		rq_hang_threshold;
 
 	struct timer_list	timeout;
 	struct work_struct	timeout_work;
@@ -536,6 +556,11 @@ struct request_queue {
 	struct mutex		debugfs_mutex;
 
 	bool			mq_sysfs_init_done;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 /* Keep blk_queue_flag_name[] in sync with the definitions below */
@@ -955,6 +980,8 @@ extern void blk_queue_required_elevator_features(struct request_queue *q,
 						 unsigned int features);
 extern bool blk_queue_can_use_dma_map_merging(struct request_queue *q,
 					      struct device *dev);
+extern void blk_queue_rq_hang_threshold(struct request_queue *q,
+					unsigned int hang_threshold);
 
 bool __must_check blk_get_queue(struct request_queue *);
 extern void blk_put_queue(struct request_queue *);
@@ -986,6 +1013,11 @@ struct blk_plug {
 	bool has_elevator;
 
 	struct list_head cb_list; /* md requires an unplug callback */
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 struct blk_plug_cb;
@@ -1418,6 +1450,11 @@ struct block_device_operations {
 	 * driver.
 	 */
 	int (*alternative_gpt_sector)(struct gendisk *disk, sector_t *sector);
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 #ifdef CONFIG_COMPAT

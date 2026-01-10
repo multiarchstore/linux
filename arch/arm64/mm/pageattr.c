@@ -20,28 +20,24 @@ struct page_change_data {
 
 bool rodata_full __ro_after_init = IS_ENABLED(CONFIG_RODATA_FULL_DEFAULT_ENABLED);
 
-bool can_set_direct_map(void)
+/*
+ * If rodata_full is enabled, the mapping of linear mapping range can also be
+ * block & cont mapping, here decouples the rodata_full and debug_pagealloc.
+ */
+bool can_set_block_and_cont_map(void)
 {
-	/*
-	 * rodata_full and DEBUG_PAGEALLOC require linear map to be
-	 * mapped at page granularity, so that it is possible to
-	 * protect/unprotect single pages.
-	 *
-	 * KFENCE pool requires page-granular mapping if initialized late.
-	 */
-	return rodata_full || debug_pagealloc_enabled() ||
-	       arm64_kfence_can_set_direct_map();
+	return !debug_pagealloc_enabled();
 }
 
 static int change_page_range(pte_t *ptep, unsigned long addr, void *data)
 {
 	struct page_change_data *cdata = data;
-	pte_t pte = READ_ONCE(*ptep);
+	pte_t pte = __ptep_get(ptep);
 
 	pte = clear_pte_bit(pte, cdata->clear_mask);
 	pte = set_pte_bit(pte, cdata->set_mask);
 
-	set_pte(ptep, pte);
+	__set_pte(ptep, pte);
 	return 0;
 }
 
@@ -108,6 +104,16 @@ static int change_memory_common(unsigned long addr, int numpages,
 	if (rodata_full && (pgprot_val(set_mask) == PTE_RDONLY ||
 			    pgprot_val(clear_mask) == PTE_RDONLY)) {
 		for (i = 0; i < area->nr_pages; i++) {
+			unsigned long virt = (unsigned long)page_address(area->pages[i]);
+
+			/*
+			 * Only split the linear mapping when the attribute is
+			 * changed to read only. Other situations do not suffer
+			 * the mapping type.
+			 */
+			if (pgprot_val(set_mask) == PTE_RDONLY && can_set_block_and_cont_map())
+				split_linear_mapping_after_init(virt, PAGE_SIZE, PAGE_KERNEL);
+
 			__change_memory_common((u64)page_address(area->pages[i]),
 					       PAGE_SIZE, set_mask, clear_mask);
 		}
@@ -162,6 +168,18 @@ int set_memory_valid(unsigned long addr, int numpages, int enable)
 					__pgprot(PTE_VALID));
 }
 
+int set_memory_np(unsigned long addr, int numpages)
+{
+	/*
+	 * If the addr belongs to linear mapping range, split it to pte level
+	 * before changing the attribute of the page table.
+	 */
+	if (can_set_block_and_cont_map() && __is_lm_address(addr))
+		split_linear_mapping_after_init(addr, PAGE_SIZE * numpages, PAGE_KERNEL);
+
+	return set_memory_valid(addr, numpages, 0);
+}
+
 int set_direct_map_invalid_noflush(struct page *page)
 {
 	struct page_change_data data = {
@@ -169,8 +187,9 @@ int set_direct_map_invalid_noflush(struct page *page)
 		.clear_mask = __pgprot(PTE_VALID),
 	};
 
-	if (!can_set_direct_map())
-		return 0;
+	if (can_set_block_and_cont_map())
+		split_linear_mapping_after_init((unsigned long)page_address(page),
+						PAGE_SIZE, PAGE_KERNEL);
 
 	return apply_to_page_range(&init_mm,
 				   (unsigned long)page_address(page),
@@ -184,8 +203,9 @@ int set_direct_map_default_noflush(struct page *page)
 		.clear_mask = __pgprot(PTE_RDONLY),
 	};
 
-	if (!can_set_direct_map())
-		return 0;
+	if (can_set_block_and_cont_map())
+		split_linear_mapping_after_init((unsigned long)page_address(page),
+						PAGE_SIZE, PAGE_KERNEL);
 
 	return apply_to_page_range(&init_mm,
 				   (unsigned long)page_address(page),
@@ -195,7 +215,7 @@ int set_direct_map_default_noflush(struct page *page)
 #ifdef CONFIG_DEBUG_PAGEALLOC
 void __kernel_map_pages(struct page *page, int numpages, int enable)
 {
-	if (!can_set_direct_map())
+	if (can_set_block_and_cont_map())
 		return;
 
 	set_memory_valid((unsigned long)page_address(page), numpages, enable);
@@ -242,5 +262,5 @@ bool kernel_page_present(struct page *page)
 		return true;
 
 	ptep = pte_offset_kernel(pmdp, addr);
-	return pte_valid(READ_ONCE(*ptep));
+	return pte_valid(__ptep_get(ptep));
 }

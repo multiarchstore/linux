@@ -82,6 +82,8 @@ struct load_info {
 	struct {
 		unsigned int sym, str, mod, vers, info, pcpu;
 	} index;
+
+	unsigned long subsys;
 };
 
 enum mod_license {
@@ -330,11 +332,20 @@ int module_enforce_rwx_sections(Elf_Ehdr *hdr, Elf_Shdr *sechdrs,
 
 #ifdef CONFIG_MODULE_SIG
 int module_sig_check(struct load_info *info, int flags);
+int force_subsys_sig_check(struct load_info *info);
+void set_module_subsys(struct load_info *info, const char *name);
 #else /* !CONFIG_MODULE_SIG */
 static inline int module_sig_check(struct load_info *info, int flags)
 {
 	return 0;
 }
+
+static inline int force_subsys_sig_check(struct load_info *info)
+{
+	return 0;
+}
+
+static inline void set_module_subsys(struct load_info *info, const char *name) { }
 #endif /* !CONFIG_MODULE_SIG */
 
 #ifdef CONFIG_DEBUG_KMEMLEAK

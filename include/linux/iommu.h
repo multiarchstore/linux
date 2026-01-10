@@ -13,6 +13,7 @@
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/of.h>
+#include <linux/iova_bitmap.h>
 #include <uapi/linux/iommu.h>
 
 #define IOMMU_READ	(1 << 0)
@@ -37,6 +38,7 @@ struct bus_type;
 struct device;
 struct iommu_domain;
 struct iommu_domain_ops;
+struct iommu_dirty_ops;
 struct notifier_block;
 struct iommu_sva;
 struct iommu_fault_event;
@@ -95,6 +97,8 @@ struct iommu_domain_geometry {
 struct iommu_domain {
 	unsigned type;
 	const struct iommu_domain_ops *ops;
+	const struct iommu_dirty_ops *dirty_ops;
+
 	unsigned long pgsize_bitmap;	/* Bitmap of page sizes in use */
 	struct iommu_domain_geometry geometry;
 	struct iommu_dma_cookie *iova_cookie;
@@ -111,6 +115,11 @@ struct iommu_domain {
 			int users;
 		};
 	};
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 static inline bool iommu_is_dma_domain(struct iommu_domain *domain)
@@ -133,6 +142,7 @@ enum iommu_cap {
 	 * usefully support the non-strict DMA flush queue.
 	 */
 	IOMMU_CAP_DEFERRED_FLUSH,
+	IOMMU_CAP_DIRTY_TRACKING,	/* IOMMU supports dirty tracking */
 };
 
 /* These are the possible reserved region types */
@@ -225,6 +235,38 @@ struct iommu_iotlb_gather {
 	size_t			pgsize;
 	struct list_head	freelist;
 	bool			queued;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+};
+
+/**
+ * struct iommu_dirty_bitmap - Dirty IOVA bitmap state
+ * @bitmap: IOVA bitmap
+ * @gather: Range information for a pending IOTLB flush
+ */
+struct iommu_dirty_bitmap {
+	struct iova_bitmap *bitmap;
+	struct iommu_iotlb_gather *gather;
+};
+
+/* Read but do not clear any dirty bits */
+#define IOMMU_DIRTY_NO_CLEAR (1 << 0)
+
+/**
+ * struct iommu_dirty_ops - domain specific dirty tracking operations
+ * @set_dirty_tracking: Enable or Disable dirty tracking on the iommu domain
+ * @read_and_clear_dirty: Walk IOMMU page tables for dirtied PTEs marshalled
+ *                        into a bitmap, with a bit represented as a page.
+ *                        Reads the dirty PTE bits and clears it from IO
+ *                        pagetables.
+ */
+struct iommu_dirty_ops {
+	int (*set_dirty_tracking)(struct iommu_domain *domain, bool enabled);
+	int (*read_and_clear_dirty)(struct iommu_domain *domain,
+				    unsigned long iova, size_t size,
+				    unsigned long flags,
+				    struct iommu_dirty_bitmap *dirty);
 };
 
 /**
@@ -234,7 +276,15 @@ struct iommu_iotlb_gather {
  *           op is allocated in the iommu driver and freed by the caller after
  *           use. The information type is one of enum iommu_hw_info_type defined
  *           in include/uapi/linux/iommufd.h.
- * @domain_alloc: allocate iommu domain
+ * @domain_alloc: allocate and return an iommu domain if success. Otherwise
+ *                NULL is returned. The domain is not fully initialized until
+ *                the caller iommu_domain_alloc() returns.
+ * @domain_alloc_user: Allocate an iommu domain corresponding to the input
+ *                     parameters as defined in include/uapi/linux/iommufd.h.
+ *                     Unlike @domain_alloc, it is called only by IOMMUFD and
+ *                     must fully initialize the new domain before return.
+ *                     Upon success, a domain is returned. Upon failure,
+ *                     ERR_PTR must be returned.
  * @probe_device: Add device to iommu driver handling
  * @release_device: Remove device from iommu driver handling
  * @probe_finalize: Do final setup work after the device is added to an IOMMU
@@ -267,6 +317,7 @@ struct iommu_ops {
 
 	/* Domain allocation and freeing by the iommu driver */
 	struct iommu_domain *(*domain_alloc)(unsigned iommu_domain_type);
+	struct iommu_domain *(*domain_alloc_user)(struct device *dev, u32 flags);
 
 	struct iommu_device *(*probe_device)(struct device *dev);
 	void (*release_device)(struct device *dev);
@@ -294,6 +345,15 @@ struct iommu_ops {
 	const struct iommu_domain_ops *default_domain_ops;
 	unsigned long pgsize_bitmap;
 	struct module *owner;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 };
 
 /**
@@ -541,6 +601,21 @@ void iommu_set_dma_strict(void);
 extern int report_iommu_fault(struct iommu_domain *domain, struct device *dev,
 			      unsigned long iova, int flags);
 
+static inline bool apply_zhaoxin_dmar_acpi_a_behavior(void)
+{
+#if defined(CONFIG_CPU_SUP_ZHAOXIN) || defined(CONFIG_CPU_SUP_CENTAUR)
+	if (((boot_cpu_data.x86_vendor == X86_VENDOR_CENTAUR) ||
+		(boot_cpu_data.x86_vendor == X86_VENDOR_ZHAOXIN)) &&
+		((boot_cpu_data.x86 == 7) && (boot_cpu_data.x86_model == 0x3b)))
+		return true;
+#endif
+	return false;
+}
+
+extern int iova_reserve_domain_addr(struct iommu_domain *domain, dma_addr_t start, dma_addr_t end);
+
+int __acpi_rmrr_device_create_direct_mappings(struct iommu_domain *domain, struct device *dev);
+
 static inline void iommu_flush_iotlb_all(struct iommu_domain *domain)
 {
 	if (domain->ops->flush_iotlb_all)
@@ -630,6 +705,28 @@ static inline void iommu_iotlb_gather_add_page(struct iommu_domain *domain,
 static inline bool iommu_iotlb_gather_queued(struct iommu_iotlb_gather *gather)
 {
 	return gather && gather->queued;
+}
+
+static inline void iommu_dirty_bitmap_init(struct iommu_dirty_bitmap *dirty,
+					   struct iova_bitmap *bitmap,
+					   struct iommu_iotlb_gather *gather)
+{
+	if (gather)
+		iommu_iotlb_gather_init(gather);
+
+	dirty->bitmap = bitmap;
+	dirty->gather = gather;
+}
+
+static inline void iommu_dirty_bitmap_record(struct iommu_dirty_bitmap *dirty,
+					     unsigned long iova,
+					     unsigned long length)
+{
+	if (dirty->bitmap)
+		iova_bitmap_set(dirty->bitmap, iova, length);
+
+	if (dirty->gather)
+		iommu_iotlb_gather_add_range(dirty->gather, iova, length);
 }
 
 /* PCI device grouping function */
@@ -738,6 +835,8 @@ struct iommu_fwspec {};
 struct iommu_device {};
 struct iommu_fault_param {};
 struct iommu_iotlb_gather {};
+struct iommu_dirty_bitmap {};
+struct iommu_dirty_ops {};
 
 static inline bool iommu_present(const struct bus_type *bus)
 {
@@ -968,6 +1067,18 @@ static inline void iommu_iotlb_gather_add_page(struct iommu_domain *domain,
 static inline bool iommu_iotlb_gather_queued(struct iommu_iotlb_gather *gather)
 {
 	return false;
+}
+
+static inline void iommu_dirty_bitmap_init(struct iommu_dirty_bitmap *dirty,
+					   struct iova_bitmap *bitmap,
+					   struct iommu_iotlb_gather *gather)
+{
+}
+
+static inline void iommu_dirty_bitmap_record(struct iommu_dirty_bitmap *dirty,
+					     unsigned long iova,
+					     unsigned long length)
+{
 }
 
 static inline void iommu_device_unregister(struct iommu_device *iommu)

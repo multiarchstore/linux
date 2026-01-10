@@ -14,6 +14,9 @@
 #include "nfp_net.h"
 #include "nfp_net_sriov.h"
 
+/* The configurations that precede VF creating. */
+#define NFP_NET_VF_PRE_CONFIG	NFP_NET_VF_CFG_MB_CAP_SPLIT
+
 static int
 nfp_net_sriov_check(struct nfp_app *app, int vf, u16 cap, const char *msg, bool warn)
 {
@@ -28,6 +31,10 @@ nfp_net_sriov_check(struct nfp_app *app, int vf, u16 cap, const char *msg, bool 
 			nfp_warn(app->pf->cpp, "ndo_set_vf_%s not supported\n", msg);
 		return -EOPNOTSUPP;
 	}
+
+	/* No need to check vf for the pre-configurations. */
+	if (cap & NFP_NET_VF_PRE_CONFIG)
+		return 0;
 
 	if (vf < 0 || vf >= app->pf->num_vfs) {
 		if (warn)
@@ -65,7 +72,7 @@ int nfp_app_set_vf_mac(struct net_device *netdev, int vf, u8 *mac)
 {
 	struct nfp_app *app = nfp_app_from_netdev(netdev);
 	unsigned int vf_offset;
-	int err;
+	int err, abs_vf;
 
 	err = nfp_net_sriov_check(app, vf, NFP_NET_VF_CFG_MB_CAP_MAC, "mac", true);
 	if (err)
@@ -78,13 +85,14 @@ int nfp_app_set_vf_mac(struct net_device *netdev, int vf, u8 *mac)
 		return -EINVAL;
 	}
 
+	abs_vf = vf + app->pf->multi_pf.vf_fid;
 	/* Write MAC to VF entry in VF config symbol */
-	vf_offset = NFP_NET_VF_CFG_MB_SZ + vf * NFP_NET_VF_CFG_SZ;
+	vf_offset = NFP_NET_VF_CFG_MB_SZ + abs_vf * NFP_NET_VF_CFG_SZ;
 	writel(get_unaligned_be32(mac), app->pf->vfcfg_tbl2 + vf_offset);
 	writew(get_unaligned_be16(mac + 4),
 	       app->pf->vfcfg_tbl2 + vf_offset + NFP_NET_VF_CFG_MAC_LO);
 
-	err = nfp_net_sriov_update(app, vf, NFP_NET_VF_CFG_MB_UPD_MAC, "MAC");
+	err = nfp_net_sriov_update(app, abs_vf, NFP_NET_VF_CFG_MB_UPD_MAC, "MAC");
 	if (!err)
 		nfp_info(app->pf->cpp,
 			 "MAC %pM set on VF %d, reload the VF driver to make this change effective.\n",
@@ -138,6 +146,7 @@ int nfp_app_set_vf_vlan(struct net_device *netdev, int vf, u16 vlan, u8 qos,
 	if (vlan_tag && is_proto_sup)
 		vlan_tag |= FIELD_PREP(NFP_NET_VF_CFG_VLAN_PROT, ntohs(vlan_proto));
 
+	vf += app->pf->multi_pf.vf_fid;
 	vf_offset = NFP_NET_VF_CFG_MB_SZ + vf * NFP_NET_VF_CFG_SZ;
 	writel(vlan_tag, app->pf->vfcfg_tbl2 + vf_offset + NFP_NET_VF_CFG_VLAN);
 
@@ -162,6 +171,7 @@ int nfp_app_set_vf_rate(struct net_device *netdev, int vf,
 		return -EINVAL;
 	}
 
+	vf += app->pf->multi_pf.vf_fid;
 	vf_offset = NFP_NET_VF_CFG_MB_SZ + vf * NFP_NET_VF_CFG_SZ;
 	ratevalue = FIELD_PREP(NFP_NET_VF_CFG_MAX_RATE,
 			       max_tx_rate ? max_tx_rate :
@@ -188,6 +198,7 @@ int nfp_app_set_vf_spoofchk(struct net_device *netdev, int vf, bool enable)
 		return err;
 
 	/* Write spoof check control bit to VF entry in VF config symbol */
+	vf += app->pf->multi_pf.vf_fid;
 	vf_offset = NFP_NET_VF_CFG_MB_SZ + vf * NFP_NET_VF_CFG_SZ +
 		NFP_NET_VF_CFG_CTRL;
 	vf_ctrl = readb(app->pf->vfcfg_tbl2 + vf_offset);
@@ -212,6 +223,7 @@ int nfp_app_set_vf_trust(struct net_device *netdev, int vf, bool enable)
 		return err;
 
 	/* Write trust control bit to VF entry in VF config symbol */
+	vf += app->pf->multi_pf.vf_fid;
 	vf_offset = NFP_NET_VF_CFG_MB_SZ + vf * NFP_NET_VF_CFG_SZ +
 		NFP_NET_VF_CFG_CTRL;
 	vf_ctrl = readb(app->pf->vfcfg_tbl2 + vf_offset);
@@ -246,6 +258,7 @@ int nfp_app_set_vf_link_state(struct net_device *netdev, int vf,
 	}
 
 	/* Write link state to VF entry in VF config symbol */
+	vf += app->pf->multi_pf.vf_fid;
 	vf_offset = NFP_NET_VF_CFG_MB_SZ + vf * NFP_NET_VF_CFG_SZ +
 		NFP_NET_VF_CFG_CTRL;
 	vf_ctrl = readb(app->pf->vfcfg_tbl2 + vf_offset);
@@ -271,7 +284,7 @@ int nfp_app_get_vf_config(struct net_device *netdev, int vf,
 	if (err)
 		return err;
 
-	vf_offset = NFP_NET_VF_CFG_MB_SZ + vf * NFP_NET_VF_CFG_SZ;
+	vf_offset = NFP_NET_VF_CFG_MB_SZ + (vf + app->pf->multi_pf.vf_fid) * NFP_NET_VF_CFG_SZ;
 
 	mac_hi = readl(app->pf->vfcfg_tbl2 + vf_offset);
 	mac_lo = readw(app->pf->vfcfg_tbl2 + vf_offset + NFP_NET_VF_CFG_MAC_LO);
@@ -308,4 +321,22 @@ int nfp_app_get_vf_config(struct net_device *netdev, int vf,
 	}
 
 	return 0;
+}
+
+int nfp_net_pf_init_sriov(struct nfp_pf *pf)
+{
+	int err;
+
+	if (!pf->multi_pf.en || !pf->limit_vfs)
+		return 0;
+
+	err = nfp_net_sriov_check(pf->app, 0, NFP_NET_VF_CFG_MB_CAP_SPLIT, "split", true);
+	if (err)
+		return err;
+
+	writeb(pf->limit_vfs, pf->vfcfg_tbl2 + NFP_NET_VF_CFG_MB_VF_CNT);
+
+	/* Reuse NFP_NET_VF_CFG_MB_VF_NUM to pass vf_fid to FW. */
+	return nfp_net_sriov_update(pf->app, pf->multi_pf.vf_fid,
+				    NFP_NET_VF_CFG_MB_UPD_SPLIT, "split");
 }

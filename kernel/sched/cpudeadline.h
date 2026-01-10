@@ -13,6 +13,11 @@ struct cpudl {
 	int			size;
 	cpumask_var_t		free_cpus;
 	struct cpudl_item	*elements;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 #ifdef CONFIG_SMP

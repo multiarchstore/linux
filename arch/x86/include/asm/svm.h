@@ -680,4 +680,24 @@ DEFINE_GHCB_ACCESSORS(sw_exit_info_2)
 DEFINE_GHCB_ACCESSORS(sw_scratch)
 DEFINE_GHCB_ACCESSORS(xcr0)
 
+/* same to the ring buffer max num */
+#define SVM_RING_BUFFER_MAX 4094
+
+struct csv_ringbuf_info_item {
+	struct page **pages;
+	uintptr_t hdr_vaddr;
+	uintptr_t trans_vaddr;
+	uintptr_t data_vaddr;
+	uintptr_t trans_uaddr;
+	uintptr_t hdr_uaddr;
+	unsigned long trans_len;
+	unsigned long hdr_len;
+	unsigned long n;
+};
+
+struct csv_ringbuf_infos {
+	struct csv_ringbuf_info_item *item[SVM_RING_BUFFER_MAX];
+	int num;
+};
+
 #endif

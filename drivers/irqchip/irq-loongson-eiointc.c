@@ -17,12 +17,23 @@
 #include <linux/syscore_ops.h>
 #include <asm/numa.h>
 
+#include "irq-loongson.h"
 #define EIOINTC_REG_NODEMAP	0x14a0
 #define EIOINTC_REG_IPMAP	0x14c0
 #define EIOINTC_REG_ENABLE	0x1600
 #define EIOINTC_REG_BOUNCE	0x1680
 #define EIOINTC_REG_ISR		0x1800
 #define EIOINTC_REG_ROUTE	0x1c00
+
+#define EXTIOI_VIRT_FEATURES		0x40000000
+#define  EXTIOI_HAS_VIRT_EXTENSION	0
+#define  EXTIOI_HAS_ENABLE_OPTION	1
+#define  EXTIOI_HAS_INT_ENCODE		2
+#define  EXTIOI_HAS_CPU_ENCODE		3
+#define EXTIOI_VIRT_CONFIG		0x40000004
+#define  EXTIOI_ENABLE			1
+#define  EXTIOI_ENABLE_INT_ENCODE	2
+#define  EXTIOI_ENABLE_CPU_ENCODE	3
 
 #define VEC_REG_COUNT		4
 #define VEC_COUNT_PER_REG	64
@@ -33,6 +44,16 @@
 
 #define MAX_EIO_NODES		(NR_CPUS / CORES_PER_EIO_NODE)
 
+typedef struct { DECLARE_BITMAP(bits, MAX_EIO_NODES); } extioi_node_map;
+
+#define EXTIOI_NODE_MASK_NONE							\
+((extioi_node_map) { {							\
+	[0 ... BITS_TO_LONGS(MAX_EIO_NODES)-1] =  0UL			\
+} })
+
+extioi_node_map extioi_node_maps = EXTIOI_NODE_MASK_NONE;
+
+
 static int nr_pics;
 
 struct eiointc_priv {
@@ -42,6 +63,7 @@ struct eiointc_priv {
 	cpumask_t		cpuspan_map;
 	struct fwnode_handle	*domain_handle;
 	struct irq_domain	*eiointc_domain;
+	bool			cpu_encoded;
 };
 
 static struct eiointc_priv *eiointc_priv[MAX_IO_PICS];
@@ -57,7 +79,9 @@ static void eiointc_enable(void)
 
 static int cpu_to_eio_node(int cpu)
 {
-	return cpu_logical_map(cpu) / CORES_PER_EIO_NODE;
+	int cores = (cpu_has_hypervisor ? MAX_CORES_PER_EIO_NODE : CORES_PER_EIO_NODE);
+
+	return cpu_logical_map(cpu) / cores;
 }
 
 static void eiointc_set_irq_route(int pos, unsigned int cpu, unsigned int mnode, nodemask_t *node_map)
@@ -65,6 +89,7 @@ static void eiointc_set_irq_route(int pos, unsigned int cpu, unsigned int mnode,
 	int i, node, cpu_node, route_node;
 	unsigned char coremap;
 	uint32_t pos_off, data, data_byte, data_mask;
+	nodemask_t eio_node_map = *node_map;
 
 	pos_off = pos & ~3;
 	data_byte = pos & 3;
@@ -76,21 +101,35 @@ static void eiointc_set_irq_route(int pos, unsigned int cpu, unsigned int mnode,
 
 	for_each_online_cpu(i) {
 		node = cpu_to_eio_node(i);
-		if (!node_isset(node, *node_map))
-			continue;
-
-		/* EIO node 0 is in charge of inter-node interrupt dispatch */
-		route_node = (node == mnode) ? cpu_node : node;
-		data = ((coremap | (route_node << 4)) << (data_byte * 8));
-		csr_any_send(EIOINTC_REG_ROUTE + pos_off, data, data_mask, node * CORES_PER_EIO_NODE);
+		if (node_isset(node, eio_node_map)) {
+			node_clear(node, eio_node_map);
+			/* EIO node 0 is in charge of inter-node interrupt dispatch */
+			route_node = (node == mnode) ? cpu_node : node;
+			data = ((coremap | (route_node << 4)) << (data_byte * 8));
+			csr_any_send(EIOINTC_REG_ROUTE + pos_off, data, data_mask, cpu_logical_map(i));
+		}
 	}
 }
 
 static DEFINE_RAW_SPINLOCK(affinity_lock);
 
+static void virt_extioi_set_irq_route(int irq, unsigned int cpu)
+{
+	int data;
+
+	/*
+	 * get irq route info for continuous 4 vectors
+	 * and set affinity for specified vector
+	 */
+	data = iocsr_read32(EIOINTC_REG_ROUTE + (irq & ~3));
+	data &=  ~(0xff << ((irq & 3) * 8));
+	data |= cpu_logical_map(cpu) << ((irq & 3) * 8);
+	iocsr_write32(data, EIOINTC_REG_ROUTE + (irq & ~3));
+}
+
 static int eiointc_set_irq_affinity(struct irq_data *d, const struct cpumask *affinity, bool force)
 {
-	unsigned int cpu;
+	unsigned int cpu, i;
 	unsigned long flags;
 	uint32_t vector, regaddr;
 	struct cpumask intersect_affinity;
@@ -110,16 +149,26 @@ static int eiointc_set_irq_affinity(struct irq_data *d, const struct cpumask *af
 	vector = d->hwirq;
 	regaddr = EIOINTC_REG_ENABLE + ((vector >> 5) << 2);
 
-	/* Mask target vector */
-	csr_any_send(regaddr, EIOINTC_ALL_ENABLE & (~BIT(vector & 0x1F)),
-			0x0, priv->node * CORES_PER_EIO_NODE);
+	if (priv->cpu_encoded) {
+		iocsr_write32(EIOINTC_ALL_ENABLE & ~BIT(vector & 0x1F), regaddr);
+		virt_extioi_set_irq_route(vector, cpu);
+		iocsr_write32(EIOINTC_ALL_ENABLE, regaddr);
+	} else {
+			for_each_online_cpu(i) {
+				if (cpu_to_eio_node(i) == priv->node)
+					break;
+			}
+		/* Mask target vector */
+		csr_any_send(regaddr, EIOINTC_ALL_ENABLE & (~BIT(vector & 0x1F)),
+				0x0, cpu_logical_map(i));
 
-	/* Set route for target vector */
-	eiointc_set_irq_route(vector, cpu, priv->node, &priv->node_map);
+		/* Set route for target vector */
+		eiointc_set_irq_route(vector, cpu, priv->node, &priv->node_map);
 
-	/* Unmask target vector */
-	csr_any_send(regaddr, EIOINTC_ALL_ENABLE,
-			0x0, priv->node * CORES_PER_EIO_NODE);
+		/* Unmask target vector */
+		csr_any_send(regaddr, EIOINTC_ALL_ENABLE,
+				0x0, cpu_logical_map(i));
+	}
 
 	irq_data_update_effective_affinity(d, cpumask_of(cpu));
 
@@ -146,13 +195,14 @@ static int eiointc_router_init(unsigned int cpu)
 	uint32_t data;
 	uint32_t node = cpu_to_eio_node(cpu);
 	int index = eiointc_index(node);
+	int cores = (cpu_has_hypervisor ? MAX_CORES_PER_EIO_NODE : CORES_PER_EIO_NODE);
 
 	if (index < 0) {
 		pr_err("Error: invalid nodemap!\n");
 		return -1;
 	}
 
-	if ((cpu_logical_map(cpu) % CORES_PER_EIO_NODE) == 0) {
+	if (!test_bit(node, (&extioi_node_maps)->bits)) {
 		eiointc_enable();
 
 		for (i = 0; i < eiointc_priv[0]->vec_count / 32; i++) {
@@ -168,10 +218,14 @@ static int eiointc_router_init(unsigned int cpu)
 
 		for (i = 0; i < eiointc_priv[0]->vec_count / 4; i++) {
 			/* Route to Node-0 Core-0 */
-			if (index == 0)
+			if (eiointc_priv[index]->cpu_encoded)
+				bit = cpu_logical_map(0);
+			else if (index == 0)
 				bit = BIT(cpu_logical_map(0));
 			else
-				bit = (eiointc_priv[index]->node << 4) | 1;
+				bit = (eiointc_priv[index]->node << 4) |
+				BIT(cpu_logical_map(smp_processor_id()) %
+						CORES_PER_EIO_NODE);
 
 			data = bit | (bit << 8) | (bit << 16) | (bit << 24);
 			iocsr_write32(data, EIOINTC_REG_ROUTE + i * 4);
@@ -180,8 +234,10 @@ static int eiointc_router_init(unsigned int cpu)
 		for (i = 0; i < eiointc_priv[0]->vec_count / 32; i++) {
 			data = 0xffffffff;
 			iocsr_write32(data, EIOINTC_REG_ENABLE + i * 4);
-			iocsr_write32(data, EIOINTC_REG_BOUNCE + i * 4);
+			iocsr_write32(0, EIOINTC_REG_BOUNCE + i * 4);
 		}
+
+		set_bit(node, (&extioi_node_maps)->bits);
 	}
 
 	return 0;
@@ -199,6 +255,12 @@ static void eiointc_irq_dispatch(struct irq_desc *desc)
 
 	for (i = 0; i < eiointc_priv[0]->vec_count / VEC_COUNT_PER_REG; i++) {
 		pending = iocsr_read64(EIOINTC_REG_ISR + (i << 3));
+
+		/* Skip handling if pending bitmap is zero */
+		if (!pending)
+			continue;
+
+		/* Clear the IRQs */
 		iocsr_write64(pending, EIOINTC_REG_ISR + (i << 3));
 		while (pending) {
 			int bit = __ffs(pending);
@@ -305,23 +367,8 @@ static int eiointc_suspend(void)
 
 static void eiointc_resume(void)
 {
-	int i, j;
-	struct irq_desc *desc;
-	struct irq_data *irq_data;
-
+	extioi_node_maps = EXTIOI_NODE_MASK_NONE;
 	eiointc_router_init(0);
-
-	for (i = 0; i < nr_pics; i++) {
-		for (j = 0; j < eiointc_priv[0]->vec_count; j++) {
-			desc = irq_resolve_mapping(eiointc_priv[i]->eiointc_domain, j);
-			if (desc && desc->handle_irq && desc->handle_irq != handle_bad_irq) {
-				raw_spin_lock(&desc->lock);
-				irq_data = irq_domain_get_irq_data(eiointc_priv[i]->eiointc_domain, irq_desc_get_irq(desc));
-				eiointc_set_irq_affinity(irq_data, irq_data->common->affinity, 0);
-				raw_spin_unlock(&desc->lock);
-			}
-		}
-	}
 }
 
 static struct syscore_ops eiointc_syscore_ops = {
@@ -329,7 +376,7 @@ static struct syscore_ops eiointc_syscore_ops = {
 	.resume = eiointc_resume,
 };
 
-static int __init pch_pic_parse_madt(union acpi_subtable_headers *header,
+int __init pch_pic_parse_madt(union acpi_subtable_headers *header,
 					const unsigned long end)
 {
 	struct acpi_madt_bio_pic *pchpic_entry = (struct acpi_madt_bio_pic *)header;
@@ -342,7 +389,7 @@ static int __init pch_pic_parse_madt(union acpi_subtable_headers *header,
 	return 0;
 }
 
-static int __init pch_msi_parse_madt(union acpi_subtable_headers *header,
+int __init pch_msi_parse_madt(union acpi_subtable_headers *header,
 					const unsigned long end)
 {
 	struct irq_domain *parent;
@@ -370,6 +417,9 @@ static int __init acpi_cascade_irqdomain_init(void)
 	if (r < 0)
 		return r;
 
+	if (cpu_has_avecint)
+		return 0;
+
 	r = acpi_table_parse_madt(ACPI_MADT_TYPE_MSI_PIC, pch_msi_parse_madt, 1);
 	if (r < 0)
 		return r;
@@ -380,7 +430,7 @@ static int __init acpi_cascade_irqdomain_init(void)
 static int __init eiointc_init(struct eiointc_priv *priv, int parent_irq,
 			       u64 node_map)
 {
-	int i;
+	int i, val;
 
 	node_map = node_map ? node_map : -1ULL;
 	for_each_possible_cpu(i) {
@@ -400,14 +450,25 @@ static int __init eiointc_init(struct eiointc_priv *priv, int parent_irq,
 		return -ENOMEM;
 	}
 
+	if (cpu_has_hypervisor) {
+		val = iocsr_read32(EXTIOI_VIRT_FEATURES);
+		if (val & BIT(EXTIOI_HAS_CPU_ENCODE)) {
+			val = iocsr_read32(EXTIOI_VIRT_CONFIG);
+			val |= BIT(EXTIOI_ENABLE_CPU_ENCODE);
+			iocsr_write32(val, EXTIOI_VIRT_CONFIG);
+			priv->cpu_encoded = true;
+			pr_info("loongson-extioi: enable cpu encodig\n");
+		}
+	}
+
 	eiointc_priv[nr_pics++] = priv;
 	eiointc_router_init(0);
 	irq_set_chained_handler_and_data(parent_irq, eiointc_irq_dispatch, priv);
 
 	if (nr_pics == 1) {
 		register_syscore_ops(&eiointc_syscore_ops);
-		cpuhp_setup_state_nocalls(CPUHP_AP_IRQ_LOONGARCH_STARTING,
-					  "irqchip/loongarch/intc:starting",
+		cpuhp_setup_state_nocalls(CPUHP_AP_IRQ_EIOINTC_STARTING,
+					  "irqchip/loongarch/eiointc:starting",
 					  eiointc_router_init, NULL);
 	}
 

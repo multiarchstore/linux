@@ -10,6 +10,8 @@
 #include <linux/bvec.h>
 #include <linux/device.h>
 #include <linux/ktime.h>
+#include <linux/sched/clock.h>
+#include <linux/ck_kabi.h>
 
 struct bio_set;
 struct bio;
@@ -75,6 +77,11 @@ struct block_device {
 	 * path
 	 */
 	struct device		bd_device;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 } __randomize_layout;
 
 #define bdev_whole(_bdev) \
@@ -287,6 +294,12 @@ struct bio {
 	 */
 	struct blkcg_gq		*bi_blkg;
 	struct bio_issue	bi_issue;
+#ifdef CONFIG_BLK_DEV_THROTTLING
+	unsigned long long	start_time_ns;	/* when passed to block throttle */
+	unsigned long long	io_start_time_ns;	/* when no more throttle */
+	bio_end_io_t		*bi_tg_end_io;
+	void			*bi_tg_private;
+#endif
 #ifdef CONFIG_BLK_CGROUP_IOCOST
 	u64			bi_iocost_cost;
 #endif
@@ -315,6 +328,13 @@ struct bio {
 	struct bio_vec		*bi_io_vec;	/* the actual vec list */
 
 	struct bio_set		*bi_pool;
+
+	unsigned long		bi_ext_flags;	/* extend the bi_flags */
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 
 	/*
 	 * We can inline a number of vecs at the end of the bio, to avoid
@@ -348,6 +368,37 @@ enum {
 	BIO_ZONE_WRITE_LOCKED,	/* Owns a zoned device zone write lock */
 	BIO_FLAG_LAST
 };
+
+/*
+ * Extend bio flags should be added in here
+ */
+#define BIO_THROTL_STATED 0	/* bio already stated */
+
+#ifdef CONFIG_BLK_DEV_THROTTLING
+static inline void bio_set_start_time_ns(struct bio *bio)
+{
+	preempt_disable();
+	bio->start_time_ns = sched_clock();
+	preempt_enable();
+}
+
+static inline void bio_set_io_start_time_ns(struct bio *bio)
+{
+	preempt_disable();
+	bio->io_start_time_ns = sched_clock();
+	preempt_enable();
+}
+
+static inline uint64_t bio_start_time_ns(struct bio *bio)
+{
+	return bio->start_time_ns;
+}
+
+static inline uint64_t bio_io_start_time_ns(struct bio *bio)
+{
+	return bio->io_start_time_ns;
+}
+#endif
 
 typedef __u32 __bitwise blk_mq_req_flags_t;
 

@@ -14,6 +14,7 @@
 #include <linux/bitops.h>
 #include <linux/bug.h>
 #include <linux/compat.h>
+#include <linux/cpufreq.h>
 #include <linux/elf.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -178,17 +179,24 @@ static int c_show(struct seq_file *m, void *v)
 {
 	int i, j;
 	bool compat = personality(current->personality) == PER_LINUX32;
+	unsigned int cpu, index, total, freq;
+	bool rich_container = false;
 
 	for_each_online_cpu(i) {
 		struct cpuinfo_arm64 *cpuinfo = &per_cpu(cpu_data, i);
 		u32 midr = cpuinfo->reg_midr;
+
+		index = cpu = i;
+
+		if (check_rich_container(cpu, &index, &rich_container, &total))
+			continue;
 
 		/*
 		 * glibc reads /proc/cpuinfo to determine the number of
 		 * online processors, looking for lines beginning with
 		 * "processor".  Give glibc what it expects.
 		 */
-		seq_printf(m, "processor\t: %d\n", i);
+		seq_printf(m, "processor\t: %d\n", index);
 		if (compat)
 			seq_printf(m, "model name\t: ARMv8 Processor rev %d (%s)\n",
 				   MIDR_REVISION(midr), COMPAT_ELF_PLATFORM);
@@ -235,7 +243,15 @@ static int c_show(struct seq_file *m, void *v)
 		seq_printf(m, "CPU architecture: 8\n");
 		seq_printf(m, "CPU variant\t: 0x%x\n", MIDR_VARIANT(midr));
 		seq_printf(m, "CPU part\t: 0x%03x\n", MIDR_PARTNUM(midr));
-		seq_printf(m, "CPU revision\t: %d\n\n", MIDR_REVISION(midr));
+		seq_printf(m, "CPU revision\t: %d\n", MIDR_REVISION(midr));
+		seq_printf(m, "address sizes\t: %u bits physical, %u bits virtual\n",
+			   id_aa64mmfr0_pa_range_bits(cpuinfo->reg_id_aa64mmfr0),
+			   id_aa64mmfr2_va_range_bits(cpuinfo->reg_id_aa64mmfr2));
+
+		freq = arch_cpufreq_get_khz(cpu);
+		if (freq)
+			seq_printf(m, "CPU MHz\t\t: %u.%03u\n", freq / 1000, freq % 1000);
+		seq_puts(m, "\n");
 	}
 
 	return 0;

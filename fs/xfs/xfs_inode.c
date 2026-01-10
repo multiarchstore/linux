@@ -1352,6 +1352,8 @@ xfs_itruncate_extents_flags(
 	xfs_fileoff_t		first_unmap_block;
 	xfs_filblks_t		unmap_len;
 	int			error = 0;
+	bool			secondary_inactive = false;
+	int			force_count = 0;
 
 	ASSERT(xfs_isilocked(ip, XFS_ILOCK_EXCL));
 	ASSERT(!atomic_read(&VFS_I(ip)->i_count) ||
@@ -1382,9 +1384,13 @@ xfs_itruncate_extents_flags(
 		return 0;
 	}
 
+	if (!new_size && (ip->i_reflink_flags & XFS_REFLINK_SECONDARY))
+		secondary_inactive = true;
+
 	unmap_len = XFS_MAX_FILEOFF - first_unmap_block + 1;
 	while (unmap_len > 0) {
 		ASSERT(tp->t_highest_agno == NULLAGNUMBER);
+
 		error = __xfs_bunmapi(tp, ip, first_unmap_block, &unmap_len,
 				flags, XFS_ITRUNC_MAX_EXTENTS);
 		if (error)
@@ -1394,6 +1400,14 @@ xfs_itruncate_extents_flags(
 		error = xfs_defer_finish(&tp);
 		if (error)
 			goto out;
+
+		if (secondary_inactive) {
+			if (xfs_reflink_inactive_force_log_period &&
+			    ++force_count >= xfs_reflink_inactive_force_log_period) {
+				xfs_log_force(mp, 0);
+				force_count = 0;
+			}
+		}
 	}
 
 	if (whichfork == XFS_DATA_FORK) {
@@ -1696,6 +1710,33 @@ xfs_inode_needs_inactive(
 	return xfs_can_free_eofblocks(ip, true);
 }
 
+STATIC void
+xfs_reflink_opt_disconnect(
+	struct xfs_mount        *mp,
+	struct xfs_inode        *ip,
+	bool                    unexpected)
+{
+	bool valid = false;
+
+	if (!(ip->i_reflink_flags & (XFS_REFLINK_PRIMARY |
+				XFS_REFLINK_SECONDARY)))
+		return;
+
+	mutex_lock(&mp->m_reflink_opt_lock);
+	if (ip->i_reflink_opt_ip) {
+		ip->i_reflink_opt_ip->i_reflink_opt_ip = NULL;
+		ip->i_reflink_opt_ip = NULL;
+		valid = true;
+	}
+	mutex_unlock(&mp->m_reflink_opt_lock);
+	if (valid) {
+		wake_up_all(&mp->m_reflink_opt_wait);
+		if (unexpected)
+			xfs_warn(mp, "unexpectedly, inactive reflink file in advance %llu",
+				 ip->i_ino);
+	}
+}
+
 /*
  * xfs_inactive
  *
@@ -1752,6 +1793,7 @@ xfs_inactive(
 		if (xfs_can_free_eofblocks(ip, true))
 			error = xfs_free_eofblocks(ip);
 
+		xfs_reflink_opt_disconnect(mp, ip, true);
 		goto out;
 	}
 
@@ -1782,6 +1824,8 @@ xfs_inactive(
 		error = xfs_inactive_truncate(ip);
 	if (error)
 		goto out;
+
+	xfs_reflink_opt_disconnect(mp, ip, false);
 
 	/*
 	 * If there are attributes associated with the file then blow them away

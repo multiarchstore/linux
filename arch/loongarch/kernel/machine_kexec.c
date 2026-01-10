@@ -59,6 +59,9 @@ static void kexec_image_info(const struct kimage *kimage)
 	}
 }
 
+#define MAX_ARGS 64
+#define KEXEC_CMDLINE_SIZE (COMMAND_LINE_SIZE * 2)
+
 int machine_kexec_prepare(struct kimage *kimage)
 {
 	int i;
@@ -70,11 +73,49 @@ int machine_kexec_prepare(struct kimage *kimage)
 	kimage->arch.efi_boot = fw_arg0;
 	kimage->arch.systable_ptr = fw_arg2;
 
+	if (!fw_arg2)
+		pr_err("Small fdt mode is not supported!\n");
+
 	/* Find the command line */
 	for (i = 0; i < kimage->nr_segments; i++) {
 		if (!strncmp(bootloader, (char __user *)kimage->segment[i].buf, strlen(bootloader))) {
-			if (!copy_from_user(cmdline_ptr, kimage->segment[i].buf, COMMAND_LINE_SIZE))
-				kimage->arch.cmdline_ptr = (unsigned long)cmdline_ptr;
+			if (fw_arg0 < 2) {
+				/* New firmware */
+				if (!copy_from_user(cmdline_ptr, kimage->segment[i].buf, COMMAND_LINE_SIZE))
+					kimage->arch.cmdline_ptr = (unsigned long)cmdline_ptr;
+			} else {
+				/* Old firmware */
+				int argc = 0;
+				long offt;
+				char *ptr, *str;
+				unsigned long *argv;
+
+				/*
+				 * convert command line string to array
+				 * of parameters (as bootloader does).
+				 */
+				argv = (unsigned long *)kmalloc(KEXEC_CMDLINE_SIZE, GFP_KERNEL);
+				argv[argc++] = (unsigned long)(KEXEC_CMDLINE_ADDR + KEXEC_CMDLINE_SIZE/2);
+				str = (char *)argv + KEXEC_CMDLINE_SIZE/2;
+
+				if (copy_from_user(str, kimage->segment[i].buf, KEXEC_CMDLINE_SIZE/2))
+					return -EINVAL;
+
+				ptr = strchr(str, ' ');
+
+				while (ptr && (argc < MAX_ARGS)) {
+					*ptr = '\0';
+					if (ptr[1] != ' ') {
+						offt = (long)(ptr - str + 1);
+						argv[argc++] = (unsigned long)argv + KEXEC_CMDLINE_SIZE/2 + offt;
+					}
+					ptr = strchr(ptr + 1, ' ');
+				}
+
+				kimage->arch.efi_boot = argc;
+				kimage->arch.cmdline_ptr = (unsigned long)argv;
+				break;
+			}
 			break;
 		}
 	}
@@ -136,6 +177,28 @@ void kexec_reboot(void)
 	unreachable();
 }
 
+static void machine_kexec_mask_interrupts(void)
+{
+	unsigned int i;
+	struct irq_desc *desc;
+
+	for_each_irq_desc(i, desc) {
+		struct irq_chip *chip;
+
+		chip = irq_desc_get_chip(desc);
+		if (!chip)
+			continue;
+
+		if (chip->irq_eoi && irqd_irq_inprogress(&desc->irq_data))
+			chip->irq_eoi(&desc->irq_data);
+
+		if (chip->irq_mask)
+			chip->irq_mask(&desc->irq_data);
+
+		if (chip->irq_disable && !irqd_irq_disabled(&desc->irq_data))
+			chip->irq_disable(&desc->irq_data);
+	}
+}
 
 #ifdef CONFIG_SMP
 static void kexec_shutdown_secondary(void *regs)
@@ -249,6 +312,7 @@ void machine_crash_shutdown(struct pt_regs *regs)
 #ifdef CONFIG_SMP
 	crash_smp_send_stop();
 #endif
+	machine_kexec_mask_interrupts();
 	cpumask_set_cpu(crashing_cpu, &cpus_in_crash);
 
 	pr_info("Starting crashdump kernel...\n");
@@ -286,6 +350,7 @@ void machine_kexec(struct kimage *image)
 
 	/* We do not want to be bothered. */
 	local_irq_disable();
+	machine_kexec_mask_interrupts();
 
 	pr_notice("EFI boot flag 0x%lx\n", efi_boot);
 	pr_notice("Command line at 0x%lx\n", cmdline_ptr);

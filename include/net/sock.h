@@ -545,6 +545,15 @@ struct sock {
 	struct rcu_head		sk_rcu;
 	netns_tracker		ns_tracker;
 	struct hlist_node	sk_bind2_node;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 };
 
 enum sk_pacing {
@@ -1367,6 +1376,15 @@ struct proto {
 
 	struct list_head	node;
 	int			(*diag_destroy)(struct sock *sk, int err);
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 } __randomize_layout;
 
 int proto_register(struct proto *prot, int alloc_slab);
@@ -1530,6 +1548,8 @@ proto_memory_pressure(struct proto *prot)
 struct prot_inuse {
 	int all;
 	int val[PROTO_INUSE_NR];
+
+	CK_KABI_RESERVE(1)
 };
 
 static inline void sock_prot_inuse_add(const struct net *net,

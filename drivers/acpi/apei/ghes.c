@@ -483,9 +483,62 @@ static void ghes_kick_task_work(struct callback_head *head)
 	gen_pool_free(ghes_estatus_pool, (unsigned long)estatus_node, node_len);
 }
 
+/*
+ * Tasks can handle task_work:
+ *
+ * - All user task: run task work before return to user.
+ */
+static bool should_add_task_work(struct task_struct *task)
+{
+	if (task->mm)
+		return true;
+
+	return false;
+}
+
+/**
+ * struct mce_task_work - for synchronous RAS event
+ *
+ * @twork:                callback_head for task work
+ * @pfn:                  page frame number of corrupted page
+ * @flags:                fine tune action taken
+ *
+ * Structure to pass task work to be handled before
+ * ret_to_user via task_work_add().
+ */
+struct mce_task_work {
+	struct callback_head twork;
+	u64 pfn;
+	int flags;
+};
+
+static void memory_failure_cb(struct callback_head *twork)
+{
+	int rc;
+	struct mce_task_work *twcb =
+		container_of(twork, struct mce_task_work, twork);
+
+	rc = memory_failure(twcb->pfn, twcb->flags);
+	kfree(twcb);
+
+	if (!rc)
+		return;
+	/*
+	 * -EHWPOISON from memory_failure() means that it already sent SIGBUS
+	 * to the current process with the proper error info, so no need to
+	 * send SIGBUS here again.
+	 */
+	if (rc == -EHWPOISON)
+		return;
+
+	pr_err("Memory error not recovered");
+	force_sig(SIGBUS);
+}
+
 static bool ghes_do_memory_failure(u64 physical_addr, int flags)
 {
 	unsigned long pfn;
+	struct mce_task_work *twcb;
 
 	if (!IS_ENABLED(CONFIG_ACPI_APEI_MEMORY_FAILURE))
 		return false;
@@ -498,7 +551,20 @@ static bool ghes_do_memory_failure(u64 physical_addr, int flags)
 		return false;
 	}
 
+	if (flags == MF_ACTION_REQUIRED && should_add_task_work(current)) {
+		twcb = kmalloc(sizeof(*twcb), GFP_ATOMIC);
+		if (!twcb)
+			return false;
+
+		twcb->pfn = pfn;
+		twcb->flags = flags;
+		init_task_work(&twcb->twork, memory_failure_cb);
+		task_work_add(current, &twcb->twork, TWA_RESUME);
+		return false;
+	}
+
 	memory_failure_queue(pfn, flags);
+
 	return true;
 }
 
@@ -673,6 +739,33 @@ static void ghes_defer_non_standard_event(struct acpi_hest_generic_data *gdata,
 	schedule_work(&entry->work);
 }
 
+#ifdef CONFIG_YITIAN_CPER_RAWDATA
+/*
+ * Check if the event is synchronous exception by Yitian DDR Raw data
+ * NOTE: only works for Yitian 710 now
+ */
+static bool is_sync_event(const struct acpi_hest_generic_status *estatus)
+{
+	struct yitian_raw_data_header *header;
+	struct yitian_ddr_raw_data *data;
+
+	if (!yitian_estatus_check_header(estatus))
+		return false;
+
+	header = (struct yitian_raw_data_header *)((void *)estatus +
+						   estatus->raw_data_offset);
+	if (header->type != ERR_TYPE_DDR)
+		return false;
+
+	data = (struct yitian_ddr_raw_data *)(header + 1);
+	/* 1 for synchronous exception */
+	if (data->ex_type == 1)
+		return true;
+
+	return false;
+}
+#endif /* CONFIG_YITIAN_CPER_RAWDATA */
+
 static bool ghes_do_proc(struct ghes *ghes,
 			 const struct acpi_hest_generic_status *estatus)
 {
@@ -685,6 +778,10 @@ static bool ghes_do_proc(struct ghes *ghes,
 	bool sync = is_hest_sync_notify(ghes);
 
 	sev = ghes_severity(estatus->error_severity);
+#ifdef CONFIG_YITIAN_CPER_RAWDATA
+	if (estatus->raw_data_length)
+		sync = is_sync_event(estatus);
+#endif /* CONFIG_YITIAN_CPER_RAWDATA */
 	apei_estatus_for_each_section(estatus, gdata) {
 		sec_type = (guid_t *)gdata->section_type;
 		sec_sev = ghes_severity(gdata->error_severity);
@@ -703,6 +800,9 @@ static bool ghes_do_proc(struct ghes *ghes,
 			queued = ghes_handle_memory_failure(gdata, sev, sync);
 		}
 		else if (guid_equal(sec_type, &CPER_SEC_PCIE)) {
+			struct cper_sec_pcie *pcie_err = acpi_hest_get_payload(gdata);
+
+			arch_apei_report_pcie_error(sec_sev, pcie_err);
 			ghes_handle_aer(gdata);
 		}
 		else if (guid_equal(sec_type, &CPER_SEC_PROC_ARM)) {
@@ -710,10 +810,13 @@ static bool ghes_do_proc(struct ghes *ghes,
 		} else {
 			void *err = acpi_hest_get_payload(gdata);
 
-			ghes_defer_non_standard_event(gdata, sev);
-			log_non_standard_event(sec_type, fru_id, fru_text,
-					       sec_sev, err,
-					       gdata->error_data_length);
+			if (!arch_apei_report_zdi_error(sec_type,
+							(struct cper_sec_proc_generic *)err)) {
+				ghes_defer_non_standard_event(gdata, sev);
+				log_non_standard_event(sec_type, fru_id, fru_text,
+						       sec_sev, err,
+						       gdata->error_data_length);
+			}
 		}
 	}
 
@@ -1091,6 +1194,8 @@ static int ghes_in_nmi_queue_one_entry(struct ghes *ghes,
 	u32 len, node_len;
 	u64 buf_paddr;
 	int sev, rc;
+	struct acpi_hest_generic_data *gdata;
+	guid_t *sec_type;
 
 	if (!IS_ENABLED(CONFIG_ARCH_HAVE_NMI_SAFE_CMPXCHG))
 		return -EOPNOTSUPP;
@@ -1126,6 +1231,23 @@ static int ghes_in_nmi_queue_one_entry(struct ghes *ghes,
 
 	sev = ghes_severity(estatus->error_severity);
 	if (sev >= GHES_SEV_PANIC) {
+		apei_estatus_for_each_section(estatus, gdata) {
+			sec_type = (guid_t *)gdata->section_type;
+			if (guid_equal(sec_type, &CPER_SEC_PLATFORM_MEM)) {
+				struct cper_sec_mem_err *mem_err = acpi_hest_get_payload(gdata);
+
+				arch_apei_report_mem_error(sev, mem_err);
+			} else if (guid_equal(sec_type, &CPER_SEC_PCIE)) {
+				struct cper_sec_pcie *pcie_err = acpi_hest_get_payload(gdata);
+
+				arch_apei_report_pcie_error(sev, pcie_err);
+			} else if (guid_equal(sec_type, &CPER_SEC_PROC_GENERIC)) {
+				struct cper_sec_proc_generic *zdi_err =
+							acpi_hest_get_payload(gdata);
+
+				arch_apei_report_zdi_error(sec_type, zdi_err);
+			}
+		}
 		ghes_print_queued_estatus();
 		__ghes_panic(ghes, estatus, buf_paddr, fixmap_idx);
 	}

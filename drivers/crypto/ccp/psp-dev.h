@@ -14,10 +14,29 @@
 #include <linux/list.h>
 #include <linux/bits.h>
 #include <linux/interrupt.h>
+#include <linux/miscdevice.h>
 
 #include "sp-dev.h"
 
+#define PSP_RBCTL_X86_WRITES		BIT(31)
+#define PSP_RBCTL_RBMODE_ACT		BIT(30)
+#define PSP_RBCTL_CLR_INTSTAT		BIT(29)
+#define PSP_RBTAIL_QHI_TAIL_SHIFT	16
+#define PSP_RBTAIL_QHI_TAIL_MASK	0x7FF0000
+#define PSP_RBTAIL_QLO_TAIL_MASK	0x7FF
+
+#define PSP_RBHEAD_QHI_HEAD_SHIFT	16
+#define PSP_RBHEAD_QHI_HEAD_MASK	0x7FF0000
+#define PSP_RBHEAD_QLO_HEAD_MASK	0x7FF
+
+#define PSP_RBHEAD_QPAUSE_INT_STAT	BIT(30)
+
 #define MAX_PSP_NAME_LEN		16
+
+#ifdef CONFIG_HYGON_PSP2CPU_CMD
+#define PSP_X86_CMD			BIT(2)
+#define P2C_NOTIFIERS_MAX		16
+#endif
 
 extern struct psp_device *psp_master;
 
@@ -43,6 +62,21 @@ struct psp_device {
 	void *dbc_data;
 
 	unsigned int capability;
+};
+
+#define PSP_MUTEX_TIMEOUT 600000
+struct psp_mutex {
+	uint64_t locked;
+};
+
+struct psp_dev_data {
+	struct psp_mutex mb_mutex;
+};
+
+struct psp_misc_dev {
+	struct kref refcount;
+	struct psp_dev_data *data_pg_aligned;
+	struct miscdevice misc;
 };
 
 void psp_set_sev_irq_handler(struct psp_device *psp, psp_irq_handler_t handler,

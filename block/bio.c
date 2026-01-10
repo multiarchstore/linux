@@ -263,6 +263,12 @@ void bio_init(struct bio *bio, struct block_device *bdev, struct bio_vec *table,
 	bio->bi_issue.value = 0;
 	if (bdev)
 		bio_associate_blkg(bio);
+#ifdef CONFIG_BLK_DEV_THROTTLING
+	bio->start_time_ns = 0;
+	bio->io_start_time_ns = 0;
+	bio->bi_tg_end_io = NULL;
+	bio->bi_tg_private = NULL;
+#endif
 #ifdef CONFIG_BLK_CGROUP_IOCOST
 	bio->bi_iocost_cost = 0;
 #endif
@@ -1376,12 +1382,15 @@ int submit_bio_wait(struct bio *bio)
 
 	/* Prevent hang_check timer from firing at us during very long I/O */
 	hang_check = sysctl_hung_task_timeout_secs;
+
+	task_set_wait_res(TASK_WAIT_BIO, bio);
 	if (hang_check)
 		while (!wait_for_completion_io_timeout(&done,
 					hang_check * (HZ/2)))
 			;
 	else
 		wait_for_completion_io(&done);
+	task_clear_wait_res();
 
 	return blk_status_to_errno(bio->bi_status);
 }
@@ -1602,6 +1611,10 @@ again:
 	blk_throtl_bio_endio(bio);
 	/* release cgroup info */
 	bio_uninit(bio);
+#ifdef CONFIG_BLK_DEV_THROTTLING
+	if (bio->bi_tg_end_io)
+		bio->bi_tg_end_io(bio);
+#endif
 	if (bio->bi_end_io)
 		bio->bi_end_io(bio);
 }

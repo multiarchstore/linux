@@ -340,6 +340,8 @@ struct ftrace_ops {
 	unsigned long			direct_call;
 #endif
 #endif
+
+	CK_KABI_RESERVE(1)
 };
 
 extern struct ftrace_ops __rcu *ftrace_ops_list;

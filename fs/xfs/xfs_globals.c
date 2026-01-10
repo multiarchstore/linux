@@ -30,6 +30,7 @@ xfs_param_t xfs_params = {
 	.inherit_nodfrg	= {	0,		1,		1	},
 	.fstrm_timer	= {	1,		30*100,		3600*100},
 	.blockgc_timer	= {	1,		300,		3600*24},
+	.reflink_inactive_force_log_period = {	0,	5,		1000 },
 };
 
 struct xfs_globals xfs_globals = {

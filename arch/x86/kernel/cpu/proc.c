@@ -17,14 +17,22 @@ extern const char * const x86_vmx_flags[NVMXINTS*32];
  *	Get CPU information for use by the procfs.
  */
 static void show_cpuinfo_core(struct seq_file *m, struct cpuinfo_x86 *c,
-			      unsigned int cpu)
+			      unsigned int cpu, unsigned int index,
+			      bool rich_container, unsigned int total)
 {
 #ifdef CONFIG_SMP
-	seq_printf(m, "physical id\t: %d\n", c->phys_proc_id);
-	seq_printf(m, "siblings\t: %d\n",
-		   cpumask_weight(topology_core_cpumask(cpu)));
-	seq_printf(m, "core id\t\t: %d\n", c->cpu_core_id);
-	seq_printf(m, "cpu cores\t: %d\n", c->booted_cores);
+	if (rich_container) {
+		seq_puts(m, "physical id\t: 0\n");
+		seq_printf(m, "siblings\t: %d\n", total);
+		seq_printf(m, "core id\t\t: %d\n", index);
+		seq_printf(m, "cpu cores\t: %d\n", total);
+	} else {
+		seq_printf(m, "physical id\t: %d\n", c->phys_proc_id);
+		seq_printf(m, "siblings\t: %d\n",
+			   cpumask_weight(topology_core_cpumask(cpu)));
+		seq_printf(m, "core id\t\t: %d\n", c->cpu_core_id);
+		seq_printf(m, "cpu cores\t: %d\n", c->booted_cores);
+	}
 	seq_printf(m, "apicid\t\t: %d\n", c->apicid);
 	seq_printf(m, "initial apicid\t: %d\n", c->initial_apicid);
 #endif
@@ -63,16 +71,20 @@ static void show_cpuinfo_misc(struct seq_file *m, struct cpuinfo_x86 *c)
 static int show_cpuinfo(struct seq_file *m, void *v)
 {
 	struct cpuinfo_x86 *c = v;
-	unsigned int cpu;
+	unsigned int cpu, index, total;
 	int i;
+	bool rich_container = false;
 
-	cpu = c->cpu_index;
+	index = cpu = c->cpu_index;
+	if (check_rich_container(cpu, &index, &rich_container, &total))
+		return 0;
+
 	seq_printf(m, "processor\t: %u\n"
 		   "vendor_id\t: %s\n"
 		   "cpu family\t: %d\n"
 		   "model\t\t: %u\n"
 		   "model name\t: %s\n",
-		   cpu,
+		   index,
 		   c->x86_vendor_id[0] ? c->x86_vendor_id : "unknown",
 		   c->x86,
 		   c->x86_model,
@@ -95,13 +107,19 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 	if (c->x86_cache_size)
 		seq_printf(m, "cache size\t: %u KB\n", c->x86_cache_size);
 
-	show_cpuinfo_core(m, c, cpu);
+	show_cpuinfo_core(m, c, cpu, index, rich_container, total);
 	show_cpuinfo_misc(m, c);
 
 	seq_puts(m, "flags\t\t:");
 	for (i = 0; i < 32*NCAPINTS; i++)
-		if (cpu_has(c, i) && x86_cap_flags[i] != NULL)
-			seq_printf(m, " %s", x86_cap_flags[i]);
+		if (cpu_has(c, i) && x86_cap_flags[i] != NULL) {
+			if (c->x86_vendor == X86_VENDOR_HYGON)
+				seq_printf(m, " %s", i == X86_FEATURE_SEV ? "csv" :
+					   (i == X86_FEATURE_SEV_ES ? "csv2" :
+					    x86_cap_flags[i]));
+			else
+				seq_printf(m, " %s", x86_cap_flags[i]);
+		}
 
 #ifdef CONFIG_X86_VMX_FEATURE_NAMES
 	if (cpu_has(c, X86_FEATURE_VMX) && c->vmx_capability[0]) {

@@ -65,6 +65,8 @@ struct mem_cgroup_reclaim_cookie {
 struct mem_cgroup_id {
 	int id;
 	refcount_t ref;
+
+	CK_KABI_RESERVE(1)
 };
 
 /*
@@ -139,6 +141,11 @@ struct mem_cgroup_per_node {
 	bool			on_tree;
 	struct mem_cgroup	*memcg;		/* Back pointer, we cannot */
 						/* use container_of	   */
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 struct mem_cgroup_threshold {
@@ -332,6 +339,19 @@ struct mem_cgroup {
 	/* per-memcg mm_struct list */
 	struct lru_gen_mm_list mm_list;
 #endif
+
+#ifdef CONFIG_ASYNC_FORK
+	unsigned long async_fork;
+#endif
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 
 	struct mem_cgroup_per_node *nodeinfo[];
 };
@@ -1080,15 +1100,6 @@ static inline void count_memcg_events(struct mem_cgroup *memcg,
 	local_irq_restore(flags);
 }
 
-static inline void count_memcg_page_event(struct page *page,
-					  enum vm_event_item idx)
-{
-	struct mem_cgroup *memcg = page_memcg(page);
-
-	if (memcg)
-		count_memcg_events(memcg, idx, 1);
-}
-
 static inline void count_memcg_folio_events(struct folio *folio,
 		enum vm_event_item idx, unsigned long nr)
 {
@@ -1158,6 +1169,18 @@ void split_page_memcg(struct page *head, unsigned int nr);
 unsigned long mem_cgroup_soft_limit_reclaim(pg_data_t *pgdat, int order,
 						gfp_t gfp_mask,
 						unsigned long *total_scanned);
+
+void memcg_meminfo(struct mem_cgroup *memcg,
+		struct sysinfo *info, struct sysinfo_ext *ext);
+
+#ifdef CONFIG_RICH_CONTAINER
+struct mem_cgroup *rich_container_get_memcg(void);
+#else
+static inline struct mem_cgroup *rich_container_get_memcg(void)
+{
+	return NULL;
+}
+#endif
 
 #else /* CONFIG_MEMCG */
 
@@ -1565,11 +1588,6 @@ static inline void __count_memcg_events(struct mem_cgroup *memcg,
 {
 }
 
-static inline void count_memcg_page_event(struct page *page,
-					  int idx)
-{
-}
-
 static inline void count_memcg_folio_events(struct folio *folio,
 		enum vm_event_item idx, unsigned long nr)
 {
@@ -1577,6 +1595,12 @@ static inline void count_memcg_folio_events(struct folio *folio,
 
 static inline
 void count_memcg_event_mm(struct mm_struct *mm, enum vm_event_item idx)
+{
+}
+
+static inline void
+memcg_meminfo(struct mem_cgroup *memcg,
+		struct sysinfo *info, struct sysinfo_ext *ext)
 {
 }
 
@@ -1592,6 +1616,30 @@ unsigned long mem_cgroup_soft_limit_reclaim(pg_data_t *pgdat, int order,
 	return 0;
 }
 #endif /* CONFIG_MEMCG */
+
+#ifdef CONFIG_ASYNC_FORK
+static inline unsigned long task_async_fork(struct task_struct *p)
+{
+	struct mem_cgroup *task_memcg;
+	unsigned long async_fork = 0UL;
+
+	if (!async_fork_enabled() || mem_cgroup_disabled())
+		return 0UL;
+
+	rcu_read_lock();
+	task_memcg = mem_cgroup_from_task(p);
+	if (task_memcg)
+		async_fork = task_memcg->async_fork;
+	rcu_read_unlock();
+
+	return async_fork;
+}
+#else
+static inline unsigned long task_async_fork(struct task_struct *p)
+{
+	return 0UL;
+}
+#endif
 
 static inline void __inc_lruvec_kmem_state(void *p, enum node_stat_item idx)
 {

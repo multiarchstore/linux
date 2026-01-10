@@ -27,6 +27,17 @@ obj-$(CONFIG_SUN6I_R_INTC)		+= irq-sun6i-r.o
 obj-$(CONFIG_SUNXI_NMI_INTC)		+= irq-sunxi-nmi.o
 obj-$(CONFIG_ARCH_SPEAR3XX)		+= spear-shirq.o
 obj-$(CONFIG_ARM_GIC)			+= irq-gic.o irq-gic-common.o
+obj-$(CONFIG_SW64_INTC_V2)     		+= irq-sw64-intc-v2.o
+obj-$(CONFIG_SW64_LPC_INTC)		+= irq-sw64-lpc-intc.o
+obj-$(CONFIG_SW64_IRQ_CPU)		+= irq-sunway-cpu.o
+
+ifeq ($(CONFIG_UNCORE_XUELANG),y)
+obj-$(CONFIG_SW64_IRQ_MSI)		+= irq-sunway-msi.o
+else
+obj-$(CONFIG_SW64_IRQ_MSI)		+= irq-sunway-msi-v2.o
+endif
+
+obj-$(CONFIG_SW64_IRQ_MSI_VT)		+= irq-sunway-msi-vt.o
 obj-$(CONFIG_ARM_GIC_PM)		+= irq-gic-pm.o
 obj-$(CONFIG_ARCH_REALVIEW)		+= irq-gic-realview.o
 obj-$(CONFIG_ARM_GIC_V2M)		+= irq-gic-v2m.o
@@ -34,6 +45,7 @@ obj-$(CONFIG_ARM_GIC_V3)		+= irq-gic-v3.o irq-gic-v3-mbi.o irq-gic-common.o
 obj-$(CONFIG_ARM_GIC_V3_ITS)		+= irq-gic-v3-its.o irq-gic-v3-its-platform-msi.o irq-gic-v4.o
 obj-$(CONFIG_ARM_GIC_V3_ITS_PCI)	+= irq-gic-v3-its-pci-msi.o
 obj-$(CONFIG_ARM_GIC_V3_ITS_FSL_MC)	+= irq-gic-v3-its-fsl-mc-msi.o
+obj-$(CONFIG_ARM_GIC_PHYTIUM_2500) += irq-gic-phytium-2500.o irq-gic-phytium-2500-its.o
 obj-$(CONFIG_PARTITION_PERCPU)		+= irq-partition-percpu.o
 obj-$(CONFIG_HISILICON_IRQ_MBIGEN)	+= irq-mbigen.o
 obj-$(CONFIG_ARM_NVIC)			+= irq-nvic.o
@@ -104,7 +116,7 @@ obj-$(CONFIG_LS1X_IRQ)			+= irq-ls1x.o
 obj-$(CONFIG_TI_SCI_INTR_IRQCHIP)	+= irq-ti-sci-intr.o
 obj-$(CONFIG_TI_SCI_INTA_IRQCHIP)	+= irq-ti-sci-inta.o
 obj-$(CONFIG_TI_PRUSS_INTC)		+= irq-pruss-intc.o
-obj-$(CONFIG_IRQ_LOONGARCH_CPU)		+= irq-loongarch-cpu.o
+obj-$(CONFIG_IRQ_LOONGARCH_CPU)		+= irq-loongarch-cpu.o irq-loongarch-avec.o
 obj-$(CONFIG_LOONGSON_LIOINTC)		+= irq-loongson-liointc.o
 obj-$(CONFIG_LOONGSON_EIOINTC)		+= irq-loongson-eiointc.o
 obj-$(CONFIG_LOONGSON_HTPIC)		+= irq-loongson-htpic.o

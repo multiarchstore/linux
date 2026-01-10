@@ -419,6 +419,7 @@ static void xgene_dma_prep_xor_desc(struct xgene_dma_chan *chan,
 {
 	struct xgene_dma_desc_hw *desc1, *desc2;
 	size_t len = *nbytes;
+	__le64 *ext8;
 	int i;
 
 	desc1 = &desc_sw->desc1;
@@ -440,9 +441,12 @@ static void xgene_dma_prep_xor_desc(struct xgene_dma_chan *chan,
 	/* Set 1st to 5th source addresses */
 	for (i = 0; i < src_cnt; i++) {
 		len = *nbytes;
-		xgene_dma_set_src_buffer((i == 0) ? &desc1->m1 :
-					 xgene_dma_lookup_ext8(desc2, i - 1),
-					 &len, &src[i]);
+		if (i == 0)
+			ext8 = &desc1->m1;
+		else
+			ext8 = xgene_dma_lookup_ext8(desc2, i - 1);
+
+		xgene_dma_set_src_buffer(ext8, &len, &src[i]);
 		desc1->m2 |= cpu_to_le64((scf[i] << ((i + 1) * 8)));
 	}
 

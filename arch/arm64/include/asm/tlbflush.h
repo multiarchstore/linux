@@ -229,6 +229,10 @@ static inline unsigned long get_trans_granule(void)
  *		determined by 'stride' and only affect any walk-cache entries
  *		if 'last_level' is equal to false.
  *
+ *	__flush_tlb_kernel_pgtable_entry(addr)
+ *		Invalidate a single kernel mapping for address "addr" on all
+ *		CPUs. Must be called if the corresponding page table is
+ *		last_level entry.
  *
  *	Finally, take a look at asm/tlb.h to see how tlb_flush() is implemented
  *	on top of these routines, since that is our interface to the mmu_gather
@@ -402,7 +406,7 @@ do {									\
 #define __flush_s2_tlb_range_op(op, start, pages, stride, tlb_level) \
 	__flush_tlb_range_op(op, start, pages, stride, 0, tlb_level, false)
 
-static inline void __flush_tlb_range(struct vm_area_struct *vma,
+static inline void __flush_tlb_range_nosync(struct vm_area_struct *vma,
 				     unsigned long start, unsigned long end,
 				     unsigned long stride, bool last_level,
 				     int tlb_level)
@@ -434,8 +438,17 @@ static inline void __flush_tlb_range(struct vm_area_struct *vma,
 	else
 		__flush_tlb_range_op(vae1is, start, pages, stride, asid, tlb_level, true);
 
-	dsb(ish);
 	mmu_notifier_arch_invalidate_secondary_tlbs(vma->vm_mm, start, end);
+}
+
+static inline void __flush_tlb_range(struct vm_area_struct *vma,
+				     unsigned long start, unsigned long end,
+				     unsigned long stride, bool last_level,
+				     int tlb_level)
+{
+	__flush_tlb_range_nosync(vma, start, end, stride,
+				 last_level, tlb_level);
+	dsb(ish);
 }
 
 static inline void flush_tlb_range(struct vm_area_struct *vma,
@@ -478,6 +491,20 @@ static inline void __flush_tlb_kernel_pgtable(unsigned long kaddr)
 
 	dsb(ishst);
 	__tlbi(vaae1is, addr);
+	dsb(ish);
+	isb();
+}
+
+/*
+ * Used to invalidate the TLB entries to the last level page table
+ * (pud/pmd/pte).
+ */
+static inline void __flush_tlb_kernel_pgtable_entry(unsigned long kaddr)
+{
+	unsigned long addr = __TLBI_VADDR(kaddr, 0);
+
+	dsb(ishst);
+	__tlbi(vaale1is, addr);
 	dsb(ish);
 	isb();
 }

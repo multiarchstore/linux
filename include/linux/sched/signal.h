@@ -245,6 +245,11 @@ struct signal_struct {
 						 * and may have inconsistent
 						 * permissions.
 						 */
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 } __randomize_layout;
 
 /*

@@ -41,6 +41,15 @@ struct srcu_data {
 						/*  ->srcu_data_have_cbs[]. */
 	int cpu;
 	struct srcu_struct *ssp;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 };
 
 /*

@@ -64,6 +64,7 @@
 #include <linux/psi.h>
 #include <linux/seq_buf.h>
 #include <linux/sched/isolation.h>
+#include <linux/pid_namespace.h>
 #include "internal.h"
 #include <net/sock.h>
 #include <net/ip.h>
@@ -371,7 +372,12 @@ struct cgroup_subsys_state *mem_cgroup_css_from_folio(struct folio *folio)
 {
 	struct mem_cgroup *memcg = folio_memcg(folio);
 
+#ifdef CONFIG_CGROUP_WRITEBACK
+	if (!memcg ||
+	    (!cgroup_subsys_on_dfl(memory_cgrp_subsys) && !cgwb_v1))
+#else
 	if (!memcg || !cgroup_subsys_on_dfl(memory_cgrp_subsys))
+#endif
 		memcg = root_mem_cgroup;
 
 	return &memcg->css;
@@ -704,6 +710,8 @@ static const unsigned int memcg_vm_event_stat[] = {
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	THP_FAULT_ALLOC,
 	THP_COLLAPSE_ALLOC,
+	THP_SWPOUT,
+	THP_SWPOUT_FALLBACK,
 #endif
 };
 
@@ -735,6 +743,9 @@ struct memcg_vmstats_percpu {
 	/* Cgroup1: threshold notifications & softlimit tree updates */
 	unsigned long		nr_page_events;
 	unsigned long		targets[MEM_CGROUP_NTARGETS];
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 struct memcg_vmstats {
@@ -4197,6 +4208,25 @@ static int mem_cgroup_swappiness_write(struct cgroup_subsys_state *css,
 	return 0;
 }
 
+#ifdef CONFIG_ASYNC_FORK
+static u64 mem_cgroup_async_fork_read(struct cgroup_subsys_state *css,
+					struct cftype *cft)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	return memcg->async_fork;
+}
+
+static int mem_cgroup_async_fork_write(struct cgroup_subsys_state *css,
+					 struct cftype *cft, u64 val)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+
+	memcg->async_fork = val;
+	return 0;
+}
+#endif
+
 static void __mem_cgroup_threshold(struct mem_cgroup *memcg, bool swap)
 {
 	struct mem_cgroup_threshold_ary *t;
@@ -5141,6 +5171,13 @@ static struct cftype mem_cgroup_legacy_files[] = {
 		.write = mem_cgroup_reset,
 		.read_u64 = mem_cgroup_read_u64,
 	},
+#ifdef CONFIG_ASYNC_FORK
+	{
+		.name = "async_fork",
+		.read_u64 = mem_cgroup_async_fork_read,
+		.write_u64 = mem_cgroup_async_fork_write,
+	},
+#endif
 	{ },	/* terminate */
 };
 
@@ -5388,6 +5425,9 @@ mem_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 	if (parent) {
 		WRITE_ONCE(memcg->swappiness, mem_cgroup_swappiness(parent));
 		WRITE_ONCE(memcg->oom_kill_disable, READ_ONCE(parent->oom_kill_disable));
+#ifdef CONFIG_ASYNC_FORK
+		memcg->async_fork = parent->async_fork;
+#endif
 
 		page_counter_init(&memcg->memory, &parent->memory);
 		page_counter_init(&memcg->swap, &parent->swap);
@@ -6818,6 +6858,13 @@ static struct cftype memory_files[] = {
 		.flags = CFTYPE_NS_DELEGATABLE,
 		.write = memory_reclaim,
 	},
+#ifdef CONFIG_ASYNC_FORK
+	{
+		.name = "async_fork",
+		.read_u64 = mem_cgroup_async_fork_read,
+		.write_u64 = mem_cgroup_async_fork_write,
+	},
+#endif
 	{ }	/* terminate */
 };
 
@@ -7388,6 +7435,18 @@ static int __init cgroup_memory(char *s)
 }
 __setup("cgroup.memory=", cgroup_memory);
 
+#ifdef CONFIG_CGROUP_WRITEBACK
+bool cgwb_v1;
+
+static int __init enable_cgroup_writeback_v1(char *s)
+{
+	cgwb_v1 = true;
+
+	return 0;
+}
+__setup("cgwb_v1", enable_cgroup_writeback_v1);
+#endif
+
 /*
  * subsys_initcall() for memory controller.
  *
@@ -7935,5 +7994,113 @@ static int __init mem_cgroup_swap_init(void)
 	return 0;
 }
 subsys_initcall(mem_cgroup_swap_init);
+
+#endif /* CONFIG_MEMCG_SWAP */
+
+#ifdef CONFIG_RICH_CONTAINER
+static inline struct mem_cgroup *css_memcg(struct cgroup_subsys_state *css)
+{
+	return css ? container_of(css, struct mem_cgroup, css) : NULL;
+}
+
+/* with rcu lock held */
+struct mem_cgroup *rich_container_get_memcg(void)
+{
+	struct cgroup_subsys_state *css;
+	struct mem_cgroup *memcg_src;
+
+	if (sysctl_rich_container_source == 1)
+		css = NULL;
+	else
+		css = task_css(current, memory_cgrp_id);
+
+	if (css) {
+		memcg_src = css_memcg(css);
+	} else {
+		read_lock(&tasklist_lock);
+		memcg_src = mem_cgroup_from_task(task_active_pid_ns(current)->child_reaper);
+		read_unlock(&tasklist_lock);
+	}
+
+	if (css_tryget(&memcg_src->css))
+		return memcg_src;
+	else
+		return NULL;
+}
+
+void memcg_meminfo(struct mem_cgroup *memcg,
+		struct sysinfo *info, struct sysinfo_ext *ext)
+{
+	struct mem_cgroup *iter;
+	unsigned long limit, memsw_limit, usage, totalram_pages_tmp;
+	unsigned long pagecache, memcg_wmark, swap_size;
+	int i;
+
+	ext->cached = memcg_page_state(memcg, NR_FILE_PAGES);
+	ext->file_dirty = memcg_page_state(memcg, NR_FILE_DIRTY);
+	ext->writeback = memcg_page_state(memcg, NR_WRITEBACK);
+	ext->anon_mapped = memcg_page_state(memcg, NR_ANON_MAPPED);
+	ext->file_mapped = memcg_page_state(memcg, NR_FILE_MAPPED);
+	ext->slab_reclaimable = memcg_page_state(memcg, NR_SLAB_RECLAIMABLE_B);
+	ext->slab_unreclaimable =
+		memcg_page_state(memcg, NR_SLAB_UNRECLAIMABLE_B);
+	ext->kernel_stack_kb = memcg_page_state(memcg, NR_KERNEL_STACK_KB);
+	ext->writeback_temp = 0;
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	ext->anon_thps = memcg_page_state(memcg, NR_ANON_THPS);
+#endif
+	ext->shmem_thps = 0;
+	ext->shmem_pmd_mapped = 0;
+
+	swap_size = memcg_page_state(memcg, MEMCG_SWAP);
+	limit = memsw_limit = PAGE_COUNTER_MAX;
+	for (iter = memcg; iter; iter = parent_mem_cgroup(iter)) {
+		limit = min(limit, iter->memory.max);
+		memsw_limit = min(memsw_limit, iter->memsw.max);
+	}
+	usage = mem_cgroup_usage(memcg, false);
+	totalram_pages_tmp = totalram_pages();
+	info->totalram = limit > totalram_pages_tmp ? totalram_pages_tmp : limit;
+	info->sharedram = memcg_page_state(memcg, NR_SHMEM);
+	info->freeram = info->totalram - usage;
+	/* these are not accounted by memcg yet */
+	/* if give bufferram the global value, free may show a quite
+	 * large number in the ±buffers/caches row, the reason is
+	 * it's equal to group_used - global_buffer - group_cached,
+	 * if global_buffer > group_used, we get a rewind large value.
+	 */
+	info->bufferram = 0;
+	info->totalhigh = totalhigh_pages();
+	info->freehigh = nr_free_highpages();
+	info->mem_unit = PAGE_SIZE;
+
+	/* fill in swinfo */
+	si_swapinfo(info);
+	if (memsw_limit < info->totalswap)
+		info->totalswap = memsw_limit;
+	info->freeswap = info->totalswap - swap_size;
+
+	for (i = 0; i < NR_LRU_LISTS; i++)
+		ext->lrupages[i] = memcg_page_state(memcg, NR_LRU_BASE + i);
+
+	/* Like what si_mem_available() does */
+
+	// TODO: memcg_wmark depends on background async page reclaim, waiting
+	// for it.
+
+	//memcg_wmark = memcg->memory.wmark_high;
+	//if (memcg->wmark_ratio && info->totalram > memcg_wmark)
+	//	memcg_wmark = info->totalram - memcg_wmark;
+	//else
+	//	memcg_wmark = 0;
+	memcg_wmark = 0;
+
+	pagecache = ext->lrupages[LRU_ACTIVE_FILE] +
+		ext->lrupages[LRU_INACTIVE_FILE];
+	pagecache -= min(pagecache / 2, memcg_wmark);
+	ext->available = info->freeram + pagecache;
+	ext->available += ext->slab_reclaimable -
+		min(ext->slab_reclaimable / 2, memcg_wmark);
+}
 
 #endif /* CONFIG_SWAP */

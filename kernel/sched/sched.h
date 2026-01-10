@@ -89,6 +89,7 @@
 #endif
 
 #include <asm/barrier.h>
+#include <linux/ck_kabi.h>
 
 #include "cpupri.h"
 #include "cpudeadline.h"
@@ -106,15 +107,30 @@ struct cpuidle_state;
 #define TASK_ON_RQ_QUEUED	1
 #define TASK_ON_RQ_MIGRATING	2
 
+#ifdef CONFIG_CFS_BANDWIDTH
+extern const u64 max_cfs_runtime;
+extern unsigned int sysctl_sched_cfs_bw_burst_onset_percent;
+#endif
+
 extern __read_mostly int scheduler_running;
 
 extern unsigned long calc_load_update;
 extern atomic_long_t calc_load_tasks;
+extern atomic_long_t calc_load_tasks_r;
 
 extern unsigned int sysctl_sched_child_runs_first;
 
 extern void calc_global_load_tick(struct rq *this_rq);
 extern long calc_load_fold_active(struct rq *this_rq, long adjust);
+
+#ifdef CONFIG_SCHED_SLI
+extern long calc_load_fold_active_r(struct rq *this_rq, long adjust);
+#else
+static inline long calc_load_fold_active_r(struct rq *this_rq, long adjust)
+{
+	return 0;
+}
+#endif
 
 extern void call_trace_sched_update_nr_running(struct rq *rq, int count);
 
@@ -284,6 +300,11 @@ struct rt_bandwidth {
 	u64			rt_runtime;
 	struct hrtimer		rt_period_timer;
 	unsigned int		rt_period_active;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 void __dl_clear_params(struct task_struct *p);
@@ -315,6 +336,11 @@ struct dl_bw {
 	raw_spinlock_t		lock;
 	u64			bw;
 	u64			total_bw;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 extern void init_dl_bw(struct dl_bw *dl_b);
@@ -335,6 +361,52 @@ struct rt_rq;
 
 extern struct list_head task_groups;
 
+enum sched_lat_stat_item {
+	SCHED_LAT_WAIT,
+	SCHED_LAT_BLOCK,
+	SCHED_LAT_IOBLOCK,
+	SCHED_LAT_CGROUP_WAIT,
+	SCHED_LAT_NR_STAT
+};
+
+/*
+ * [0, 1ms)
+ * [1, 4ms)
+ * [4, 7ms)
+ * [7, 10ms)
+ * [10, 100ms)
+ * [100, 500ms)
+ * [500, 1000ms)
+ * [1000, 5000ms)
+ * [5000, 10000ms)
+ * [10000ms, INF)
+ * total(ms)
+ */
+/* Scheduler latency histogram distribution, in milliseconds */
+enum sched_lat_count_t {
+	SCHED_LAT_0_1,
+	SCHED_LAT_1_4,
+	SCHED_LAT_4_7,
+	SCHED_LAT_7_10,
+	SCHED_LAT_10_20,
+	SCHED_LAT_20_30,
+	SCHED_LAT_30_40,
+	SCHED_LAT_40_50,
+	SCHED_LAT_50_100,
+	SCHED_LAT_100_500,
+	SCHED_LAT_500_1000,
+	SCHED_LAT_1000_5000,
+	SCHED_LAT_5000_10000,
+	SCHED_LAT_10000_INF,
+	SCHED_LAT_TOTAL,
+	SCHED_LAT_NR,
+	SCHED_LAT_NR_COUNT,
+};
+
+struct sched_cgroup_lat_stat_cpu {
+	unsigned long item[SCHED_LAT_NR_STAT][SCHED_LAT_NR_COUNT];
+};
+
 struct cfs_bandwidth {
 #ifdef CONFIG_CFS_BANDWIDTH
 	raw_spinlock_t		lock;
@@ -342,6 +414,10 @@ struct cfs_bandwidth {
 	u64			quota;
 	u64			runtime;
 	u64			burst;
+	u64			init_buffer;
+	u64			current_buffer;
+	u64			buffer;
+	u64			max_overrun;
 	u64			runtime_snap;
 	s64			hierarchical_quota;
 
@@ -358,6 +434,11 @@ struct cfs_bandwidth {
 	int			nr_burst;
 	u64			throttled_time;
 	u64			burst_time;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 #endif
 };
 
@@ -413,7 +494,22 @@ struct task_group {
 	/* Effective clamp values used for a task group */
 	struct uclamp_se	uclamp[UCLAMP_CNT];
 #endif
+#if defined(CONFIG_SCHED_CORE) && defined(CONFIG_CFS_BANDWIDTH)
+	unsigned int		ht_ratio;
+#endif
 
+#ifdef CONFIG_SCHED_SLI
+	struct sched_cgroup_lat_stat_cpu __percpu *lat_stat_cpu;
+#endif
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 };
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -458,8 +554,7 @@ extern void init_tg_cfs_entry(struct task_group *tg, struct cfs_rq *cfs_rq,
 			struct sched_entity *parent);
 extern void init_cfs_bandwidth(struct cfs_bandwidth *cfs_b, struct cfs_bandwidth *parent);
 
-extern void __refill_cfs_bandwidth_runtime(struct cfs_bandwidth *cfs_b);
-extern void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
+extern void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b, int init);
 extern void unthrottle_cfs_rq(struct cfs_rq *cfs_rq);
 extern bool cfs_task_bw_constrained(struct task_struct *p);
 
@@ -651,6 +746,17 @@ struct cfs_rq {
 #endif
 #endif /* CONFIG_CFS_BANDWIDTH */
 #endif /* CONFIG_FAIR_GROUP_SCHED */
+
+	unsigned long		nr_uninterruptible;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 };
 
 static inline int rt_bandwidth_enabled(void)
@@ -697,6 +803,13 @@ struct rt_rq {
 	struct rq		*rq;
 	struct task_group	*tg;
 #endif
+
+	unsigned long		nr_uninterruptible;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 static inline bool rt_rq_is_runnable(struct rt_rq *rt_rq)
@@ -765,6 +878,11 @@ struct dl_rq {
 	 * by the GRUB algorithm.
 	 */
 	u64			bw_ratio;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -891,6 +1009,11 @@ struct root_domain {
 	 * CPUs of the rd. Protected by RCU.
 	 */
 	struct perf_domain __rcu *pd;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 extern void init_defrootdomain(void);
@@ -1019,7 +1142,14 @@ struct rq {
 	struct task_struct	*idle;
 	struct task_struct	*stop;
 	unsigned long		next_balance;
-	struct mm_struct	*prev_mm;
+
+	/*
+	 * Frequent writing to prev_mm and clock_update_flags on local
+	 * CPU causes cacheline containing idle to be invalidated on
+	 * other CPUs. Put prev_mm and sequential fields on a new
+	 * cacheline to fix it.
+	 */
+	struct mm_struct        *prev_mm ____cacheline_aligned;
 
 	unsigned int		clock_update_flags;
 	u64			clock;
@@ -1106,6 +1236,9 @@ struct rq {
 	/* calc_load related fields */
 	unsigned long		calc_load_update;
 	long			calc_load_active;
+#ifdef CONFIG_SCHED_SLI
+	long			calc_load_active_r;
+#endif
 
 #ifdef CONFIG_SCHED_HRTICK
 #ifdef CONFIG_SMP
@@ -1158,8 +1291,10 @@ struct rq {
 	unsigned long		core_cookie;
 	unsigned int		core_forceidle_count;
 	unsigned int		core_forceidle_seq;
-	unsigned int		core_forceidle_occupation;
-	u64			core_forceidle_start;
+	unsigned int		core_sibidle_occupation;
+	u64			core_sibidle_start;
+	u64			core_sibidle_start_task;
+	unsigned int		core_sibidle_count;
 #endif
 
 	/* Scratch cpumask to be temporarily used under rq_lock */
@@ -1169,6 +1304,23 @@ struct rq {
 	call_single_data_t	cfsb_csd;
 	struct list_head	cfsb_csd_list;
 #endif
+
+#ifdef CONFIG_SCHED_ACPU
+	u64 acpu_idle_sum;
+	u64 sibidle_sum;
+	u64 sibidle_task_sum;
+	u64 last_acpu_update_time;
+	u64 last_acpu_update_time_task;
+#endif
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 };
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -1321,6 +1473,11 @@ extern void sched_core_dequeue(struct rq *rq, struct task_struct *p, int flags);
 extern void sched_core_get(void);
 extern void sched_core_put(void);
 
+#ifdef CONFIG_CFS_BANDWIDTH
+extern void account_ht_aware_quota(struct task_struct *p, u64 delta);
+#else
+void account_ht_aware_quota(struct task_struct *p, u64 delta) {}
+#endif
 #else /* !CONFIG_SCHED_CORE */
 
 static inline bool sched_core_enabled(struct rq *rq)
@@ -1468,6 +1625,11 @@ static inline struct cfs_rq *group_cfs_rq(struct sched_entity *grp)
 #endif
 
 extern void update_rq_clock(struct rq *rq);
+
+static inline u64 __rq_clock_broken(struct rq *rq)
+{
+	return READ_ONCE(rq->clock);
+}
 
 /*
  * rq::clock_update_flags bits
@@ -1871,11 +2033,13 @@ static inline struct sched_domain *lowest_flag_domain(int cpu, int flag)
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_llc);
 DECLARE_PER_CPU(int, sd_llc_size);
 DECLARE_PER_CPU(int, sd_llc_id);
+DECLARE_PER_CPU(int, sd_share_id);
 DECLARE_PER_CPU(struct sched_domain_shared __rcu *, sd_llc_shared);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_numa);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_packing);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
 extern struct static_key_false sched_asym_cpucapacity;
+extern struct static_key_false sched_cluster_active;
 
 static __always_inline bool sched_asym_cpucap_active(void)
 {
@@ -1898,6 +2062,11 @@ struct sched_group_capacity {
 	int			id;
 #endif
 
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+
 	unsigned long		cpumask[];		/* Balance mask */
 };
 
@@ -1910,6 +2079,11 @@ struct sched_group {
 	struct sched_group_capacity *sgc;
 	int			asym_prefer_cpu;	/* CPU of highest priority in group */
 	int			flags;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 
 	/*
 	 * The CPUs this group covers.
@@ -1962,12 +2136,12 @@ static inline const struct cpumask *task_user_cpus(struct task_struct *p)
 
 #if defined(CONFIG_SCHED_CORE) && defined(CONFIG_SCHEDSTATS)
 
-extern void __sched_core_account_forceidle(struct rq *rq);
+extern void __sched_core_account_sibidle(struct rq *rq);
 
-static inline void sched_core_account_forceidle(struct rq *rq)
+static inline void sched_core_account_sibidle(struct rq *rq)
 {
 	if (schedstat_enabled())
-		__sched_core_account_forceidle(rq);
+		__sched_core_account_sibidle(rq);
 }
 
 extern void __sched_core_tick(struct rq *rq);
@@ -1980,7 +2154,7 @@ static inline void sched_core_tick(struct rq *rq)
 
 #else
 
-static inline void sched_core_account_forceidle(struct rq *rq) {}
+static inline void sched_core_account_sibidle(struct rq *rq) {}
 
 static inline void sched_core_tick(struct rq *rq) {}
 
@@ -2293,6 +2467,13 @@ struct sched_class {
 #ifdef CONFIG_SCHED_CORE
 	int (*task_is_throttled)(struct task_struct *p, int cpu);
 #endif
+	void (*update_nr_uninterruptible)(struct task_struct *p, long inc);
+	void (*update_nr_iowait)(struct task_struct *p, long inc);
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
 };
 
 static inline void put_prev_task(struct rq *rq, struct task_struct *prev)
@@ -2306,6 +2487,11 @@ static inline void set_next_task(struct rq *rq, struct task_struct *next)
 	next->sched_class->set_next_task(rq, next, false);
 }
 
+static inline void update_nr_iowait(struct task_struct *p, long inc)
+{
+	if (p->sched_class->update_nr_iowait)
+		p->sched_class->update_nr_iowait(p, inc);
+}
 
 /*
  * Helper to define a sched_class instance; each one is placed in a separate
@@ -3536,5 +3722,33 @@ static inline void init_sched_mm_cid(struct task_struct *t) { }
 
 extern u64 avg_vruntime(struct cfs_rq *cfs_rq);
 extern int entity_eligible(struct cfs_rq *cfs_rq, struct sched_entity *se);
+
+#ifdef CONFIG_SCHED_SLI
+extern u64 get_idle_time(struct kernel_cpustat *kcs, int cpu);
+extern u64 get_iowait_time(struct kernel_cpustat *kcs, int cpu);
+extern void task_ca_increase_nr_migrations(struct task_struct *tsk);
+void cpu_update_latency(struct sched_entity *se, u64 delta);
+void task_cpu_update_block(struct task_struct *tsk, u64 runtime);
+void calc_cgroup_load(void);
+bool async_load_calc_enabled(void);
+struct task_group *cgroup_tg(struct cgroup *cgrp);
+int sched_lat_stat_show(struct seq_file *sf, void *v);
+int sched_lat_stat_write(struct cgroup_subsys_state *css,
+				struct cftype *cft, u64 val);
+#else
+static inline void task_ca_increase_nr_migrations(struct task_struct *tsk) { }
+static inline void cpu_update_latency(struct sched_entity *se,
+		u64 delta) { }
+static inline void task_cpu_update_block(struct task_struct *tsk,
+		u64 runtime) { }
+static inline void calc_cgroup_load(void) { }
+static inline bool async_load_calc_enabled(void)
+{
+	return false;
+}
+#endif
+
+long tg_get_cfs_quota(struct task_group *tg);
+long tg_get_cfs_period(struct task_group *tg);
 
 #endif /* _KERNEL_SCHED_SCHED_H */

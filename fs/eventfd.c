@@ -41,6 +41,9 @@ struct eventfd_ctx {
 	__u64 count;
 	unsigned int flags;
 	int id;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 __u64 eventfd_signal_mask(struct eventfd_ctx *ctx, __u64 n, __poll_t mask)

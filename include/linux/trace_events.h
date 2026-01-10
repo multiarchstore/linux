@@ -126,6 +126,8 @@ struct trace_iterator {
 	long			idx;
 
 	/* All new field here will be zeroed out in pipe_read */
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
 };
 
 enum trace_iter_flags {

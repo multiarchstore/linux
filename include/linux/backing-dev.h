@@ -159,6 +159,21 @@ struct bdi_writeback *wb_get_create(struct backing_dev_info *bdi,
 void wb_memcg_offline(struct mem_cgroup *memcg);
 void wb_blkcg_offline(struct cgroup_subsys_state *css);
 
+extern bool cgwb_v1;
+
+static inline bool memcg_blkcg_on_dfl(void)
+{
+	return cgroup_subsys_on_dfl(memory_cgrp_subsys) &&
+	       cgroup_subsys_on_dfl(io_cgrp_subsys);
+}
+
+static inline bool cgroup_writeback_support_v1(void)
+{
+	return cgwb_v1 &&
+	       !cgroup_subsys_on_dfl(memory_cgrp_subsys) &&
+	       !cgroup_subsys_on_dfl(io_cgrp_subsys);
+}
+
 /**
  * inode_cgwb_enabled - test whether cgroup writeback is enabled on an inode
  * @inode: inode of interest
@@ -174,8 +189,8 @@ static inline bool inode_cgwb_enabled(struct inode *inode)
 {
 	struct backing_dev_info *bdi = inode_to_bdi(inode);
 
-	return cgroup_subsys_on_dfl(memory_cgrp_subsys) &&
-		cgroup_subsys_on_dfl(io_cgrp_subsys) &&
+	return (memcg_blkcg_on_dfl() ||
+		cgroup_writeback_support_v1()) &&
 		(bdi->capabilities & BDI_CAP_WRITEBACK) &&
 		(inode->i_sb->s_iflags & SB_I_CGROUPWB);
 }
@@ -318,6 +333,13 @@ static inline void unlocked_inode_to_wb_end(struct inode *inode,
 	rcu_read_unlock();
 }
 
+void insert_memcg_blkcg_link(struct cgroup_subsys *ss,
+			     struct list_head *tmp_links,
+			     struct css_set *cset);
+int allocate_memcg_blkcg_links(int count, struct list_head *tmp_links);
+void free_memcg_blkcg_links(struct list_head *links_to_free);
+void delete_memcg_blkcg_link(struct cgroup_subsys *ss,
+			     struct cgroup_subsys_state *css);
 #else	/* CONFIG_CGROUP_WRITEBACK */
 
 static inline bool inode_cgwb_enabled(struct inode *inode)
@@ -367,6 +389,30 @@ static inline void wb_memcg_offline(struct mem_cgroup *memcg)
 static inline void wb_blkcg_offline(struct cgroup_subsys_state *css)
 {
 }
+
+#ifdef CONFIG_CGROUPS
+struct cgroup_subsys;
+
+static inline void insert_memcg_blkcg_link(struct cgroup_subsys *ss,
+					   struct list_head *tmp_links,
+					   struct css_set *cset)
+{
+}
+
+static inline int allocate_memcg_blkcg_links(int count, struct list_head *tmp_links)
+{
+	return 0;
+}
+
+static inline void free_memcg_blkcg_links(struct list_head *links_to_free)
+{
+}
+
+static inline void delete_memcg_blkcg_link(struct cgroup_subsys *ss,
+					   struct cgroup_subsys_state *css)
+{
+}
+#endif
 
 #endif	/* CONFIG_CGROUP_WRITEBACK */
 

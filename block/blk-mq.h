@@ -158,6 +158,10 @@ struct blk_mq_alloc_data {
 	/* input & output parameter */
 	struct blk_mq_ctx *ctx;
 	struct blk_mq_hw_ctx *hctx;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
 };
 
 struct blk_mq_tags *blk_mq_init_tags(unsigned int nr_tags,
@@ -240,6 +244,8 @@ unsigned int blk_mq_in_flight(struct request_queue *q,
 		struct block_device *part);
 void blk_mq_in_flight_rw(struct request_queue *q, struct block_device *part,
 		unsigned int inflight[2]);
+void blk_mq_hang_rw(struct request_queue *q, struct block_device *part,
+		unsigned int hang[2]);
 
 static inline void blk_mq_put_dispatch_budget(struct request_queue *q,
 					      int budget_token)

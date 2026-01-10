@@ -1033,6 +1033,9 @@ static int sysctl_protected_hardlinks __read_mostly;
 static int sysctl_protected_fifos __read_mostly;
 static int sysctl_protected_regular __read_mostly;
 
+int sysctl_hardlink_cross_projid __read_mostly;
+EXPORT_SYMBOL_GPL(sysctl_hardlink_cross_projid);
+
 #ifdef CONFIG_SYSCTL
 static struct ctl_table namei_sysctls[] = {
 	{
@@ -1070,6 +1073,16 @@ static struct ctl_table namei_sysctls[] = {
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_TWO,
+	},
+	{
+		.procname	= "hardlink_cross_projid",
+		.data		= &sysctl_hardlink_cross_projid,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+
 	},
 	{ }
 };

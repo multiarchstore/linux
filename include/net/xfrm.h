@@ -124,6 +124,8 @@ struct xfrm_state_walk {
 	u8			proto;
 	u32			seq;
 	struct xfrm_address_filter *filter;
+
+	CK_KABI_RESERVE(1)
 };
 
 enum {

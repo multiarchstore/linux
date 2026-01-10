@@ -519,6 +519,7 @@ static void print_cfs_group_stats(struct seq_file *m, int cpu, struct task_group
 		PN_SCHEDSTAT(slice_max);
 		PN_SCHEDSTAT(wait_max);
 		PN_SCHEDSTAT(wait_sum);
+		PN_SCHEDSTAT(parent_wait_contrib);
 		P_SCHEDSTAT(wait_count);
 	}
 
@@ -1022,6 +1023,7 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 		PN_SCHEDSTAT(slice_max);
 		PN_SCHEDSTAT(wait_max);
 		PN_SCHEDSTAT(wait_sum);
+		PN_SCHEDSTAT(parent_wait_contrib);
 		P_SCHEDSTAT(wait_count);
 		PN_SCHEDSTAT(iowait_sum);
 		P_SCHEDSTAT(iowait_count);
@@ -1059,6 +1061,11 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 
 #ifdef CONFIG_SCHED_CORE
 		PN_SCHEDSTAT(core_forceidle_sum);
+		PN_SCHEDSTAT(core_forceidle_task_sum);
+#endif
+#ifdef CONFIG_SCHED_ACPU
+		PN_SCHEDSTAT(core_sibidle_sum);
+		PN_SCHEDSTAT(core_sibidle_task_sum);
 #endif
 	}
 

@@ -226,6 +226,8 @@ static __always_inline void test_free(void *ptr)
 		kfree(ptr);
 }
 
+#define test_free_page(addr) free_page((unsigned long)addr)
+
 /*
  * If this should be a KFENCE allocation, and on which side the allocation and
  * the closest guard page should be.
@@ -243,6 +245,7 @@ enum allocation_policy {
  */
 static void *test_alloc(struct kunit *test, size_t size, gfp_t gfp, enum allocation_policy policy)
 {
+	long _kfence_sample_interval = kfence_sample_interval;
 	void *alloc;
 	unsigned long timeout, resched_after;
 	const char *policy_name;
@@ -269,13 +272,15 @@ static void *test_alloc(struct kunit *test, size_t size, gfp_t gfp, enum allocat
 	 * 100x the sample interval should be more than enough to ensure we get
 	 * a KFENCE allocation eventually.
 	 */
-	timeout = jiffies + msecs_to_jiffies(100 * kfence_sample_interval);
+	if (kfence_sample_interval < 0)
+		_kfence_sample_interval = 100;
+	timeout = jiffies + msecs_to_jiffies(100 * _kfence_sample_interval);
 	/*
 	 * Especially for non-preemption kernels, ensure the allocation-gate
 	 * timer can catch up: after @resched_after, every failed allocation
 	 * attempt yields, to ensure the allocation-gate timer is scheduled.
 	 */
-	resched_after = jiffies + msecs_to_jiffies(kfence_sample_interval);
+	resched_after = jiffies + msecs_to_jiffies(_kfence_sample_interval);
 	do {
 		if (test_cache)
 			alloc = kmem_cache_alloc(test_cache, gfp);
@@ -305,6 +310,9 @@ static void *test_alloc(struct kunit *test, size_t size, gfp_t gfp, enum allocat
 		} else if (policy == ALLOCATE_NONE)
 			return alloc;
 
+		if (kfence_sample_interval < 0 && policy == ALLOCATE_NONE)
+			return alloc;
+
 		test_free(alloc);
 
 		if (time_after(jiffies, resched_after))
@@ -312,6 +320,50 @@ static void *test_alloc(struct kunit *test, size_t size, gfp_t gfp, enum allocat
 	} while (time_before(jiffies, timeout));
 
 	KUNIT_ASSERT_TRUE_MSG(test, false, "failed to allocate from KFENCE");
+	return NULL; /* Unreachable. */
+}
+
+static struct page *test_alloc_page(struct kunit *test, bool is_vmalloc)
+{
+	long _kfence_sample_interval = kfence_sample_interval;
+	struct page *alloc;
+	void *addr;
+	unsigned long timeout, resched_after;
+
+	kunit_info(test, "%s: size=%zu vmalloc=%d\n", __func__, PAGE_SIZE, is_vmalloc);
+
+	/*
+	 * 100x the sample interval should be more than enough to ensure we get
+	 * a KFENCE allocation eventually.
+	 */
+	if (kfence_sample_interval < 0)
+		_kfence_sample_interval = 100;
+	timeout = jiffies + msecs_to_jiffies(100 * _kfence_sample_interval);
+	/*
+	 * Especially for non-preemption kernels, ensure the allocation-gate
+	 * timer can catch up: after @resched_after, every failed allocation
+	 * attempt yields, to ensure the allocation-gate timer is scheduled.
+	 */
+	resched_after = jiffies + msecs_to_jiffies(_kfence_sample_interval);
+	do {
+		if (is_vmalloc) {
+			addr = vmalloc(PAGE_SIZE);
+			alloc = vmalloc_to_page(addr);
+			if (is_kfence_address(page_to_virt(alloc)))
+				return alloc;
+			vfree(addr);
+		} else {
+			alloc = alloc_page(GFP_KERNEL);
+			if (is_kfence_address(page_to_virt(alloc)))
+				return alloc;
+			__free_page(alloc);
+		}
+
+		if (time_after(jiffies, resched_after))
+			cond_resched();
+	} while (time_before(jiffies, timeout));
+
+	KUNIT_ASSERT_TRUE_MSG(test, false, "failed to allocate page from KFENCE");
 	return NULL; /* Unreachable. */
 }
 
@@ -349,6 +401,33 @@ static void test_out_of_bounds_read(struct kunit *test)
 	test_free(buf);
 }
 
+static void test_out_of_bounds_read_page(struct kunit *test)
+{
+	struct expect_report expect = {
+		.type = KFENCE_ERROR_OOB,
+		.fn = test_out_of_bounds_read_page,
+		.is_write = false,
+	};
+	char *buf;
+	struct page *page;
+
+	/* Test both sides. */
+
+	page = test_alloc_page(test, false);
+	buf = page_address(page);
+	expect.addr = buf - 1;
+	READ_ONCE(*expect.addr);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+	test_free_page(buf);
+
+	page = test_alloc_page(test, false);
+	buf = page_address(page);
+	expect.addr = buf + PAGE_SIZE;
+	READ_ONCE(*expect.addr);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+	test_free_page(buf);
+}
+
 static void test_out_of_bounds_write(struct kunit *test)
 {
 	size_t size = 32;
@@ -367,6 +446,24 @@ static void test_out_of_bounds_write(struct kunit *test)
 	test_free(buf);
 }
 
+static void test_out_of_bounds_write_page(struct kunit *test)
+{
+	struct expect_report expect = {
+		.type = KFENCE_ERROR_OOB,
+		.fn = test_out_of_bounds_write_page,
+		.is_write = true,
+	};
+	char *buf;
+	struct page *page;
+
+	page = test_alloc_page(test, false);
+	buf = page_address(page);
+	expect.addr = buf - 1;
+	WRITE_ONCE(*expect.addr, 42);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+	test_free_page(buf);
+}
+
 static void test_use_after_free_read(struct kunit *test)
 {
 	const size_t size = 32;
@@ -379,6 +476,22 @@ static void test_use_after_free_read(struct kunit *test)
 	setup_test_cache(test, size, 0, NULL);
 	expect.addr = test_alloc(test, size, GFP_KERNEL, ALLOCATE_ANY);
 	test_free(expect.addr);
+	READ_ONCE(*expect.addr);
+	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
+}
+
+static void test_use_after_free_read_page(struct kunit *test)
+{
+	struct expect_report expect = {
+		.type = KFENCE_ERROR_UAF,
+		.fn = test_use_after_free_read_page,
+		.is_write = false,
+	};
+	struct page *page;
+
+	page = test_alloc_page(test, false);
+	expect.addr = page_address(page);
+	test_free_page(expect.addr);
 	READ_ONCE(*expect.addr);
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
 }
@@ -609,7 +722,7 @@ static void test_gfpzero(struct kunit *test)
 	int i;
 
 	/* Skip if we think it'd take too long. */
-	KFENCE_TEST_REQUIRES(test, kfence_sample_interval <= 100);
+	KFENCE_TEST_REQUIRES(test, kfence_sample_interval <= 100 && kfence_num_objects <= 255);
 
 	setup_test_cache(test, size, 0, NULL);
 	buf1 = test_alloc(test, size, GFP_KERNEL, ALLOCATE_ANY);
@@ -624,7 +737,7 @@ static void test_gfpzero(struct kunit *test)
 			break;
 		test_free(buf2);
 
-		if (kthread_should_stop() || (i == CONFIG_KFENCE_NUM_OBJECTS)) {
+		if (kthread_should_stop() || (i == kfence_num_objects)) {
 			kunit_warn(test, "giving up ... cannot get same object back\n");
 			return;
 		}
@@ -641,12 +754,19 @@ static void test_gfpzero(struct kunit *test)
 
 static void test_invalid_access(struct kunit *test)
 {
-	const struct expect_report expect = {
+	struct expect_report expect = {
 		.type = KFENCE_ERROR_INVALID,
 		.fn = test_invalid_access,
-		.addr = &__kfence_pool[10],
 		.is_write = false,
 	};
+	struct rb_node *cur = kfence_pool_root.rb_node;
+	char *__kfence_pool;
+
+	if (!cur)
+		return;
+
+	__kfence_pool = kfence_rbentry(cur)->addr;
+	expect.addr = &__kfence_pool[10];
 
 	READ_ONCE(__kfence_pool[10]);
 	KUNIT_EXPECT_TRUE(test, report_matches(&expect));
@@ -731,6 +851,7 @@ static void test_krealloc(struct kunit *test)
 /* Test that some objects from a bulk allocation belong to KFENCE pool. */
 static void test_memcache_alloc_bulk(struct kunit *test)
 {
+	long _kfence_sample_interval = kfence_sample_interval;
 	const size_t size = 32;
 	bool pass = false;
 	unsigned long timeout;
@@ -741,7 +862,9 @@ static void test_memcache_alloc_bulk(struct kunit *test)
 	 * 100x the sample interval should be more than enough to ensure we get
 	 * a KFENCE allocation eventually.
 	 */
-	timeout = jiffies + msecs_to_jiffies(100 * kfence_sample_interval);
+	if (kfence_sample_interval < 0)
+		_kfence_sample_interval = 100;
+	timeout = jiffies + msecs_to_jiffies(100 * _kfence_sample_interval);
 	do {
 		void *objects[100];
 		int i, num = kmem_cache_alloc_bulk(test_cache, GFP_ATOMIC, ARRAY_SIZE(objects),
@@ -765,6 +888,37 @@ static void test_memcache_alloc_bulk(struct kunit *test)
 
 	KUNIT_EXPECT_TRUE(test, pass);
 	KUNIT_EXPECT_FALSE(test, report_available());
+}
+
+static void test_kernel_stack(struct kunit *test)
+{
+	unsigned long vaddr = (unsigned long)current->stack;
+	struct page *page;
+	int i;
+
+	KFENCE_TEST_REQUIRES(test, IS_ENABLED(CONFIG_VMAP_STACK) && kfence_sample_interval < 0);
+
+	for (i = 0 ; i < 1<<THREAD_SIZE_ORDER; i++, vaddr += PAGE_SIZE) {
+		page = vmalloc_to_page((void *)vaddr);
+		KUNIT_EXPECT_TRUE(test, is_kfence_address(page_to_virt(page)));
+	}
+}
+
+static void test_vmalloc_page(struct kunit *test)
+{
+	test_alloc_page(test, true);
+	KUNIT_EXPECT_TRUE(test, true);
+}
+
+static void test_page_nokfence(struct kunit *test)
+{
+	struct page *page;
+
+	KFENCE_TEST_REQUIRES(test, kfence_sample_interval < 0);
+
+	page = alloc_page(GFP_KERNEL | __GFP_NOKFENCE);
+	KUNIT_EXPECT_FALSE(test, is_kfence_address(page_to_virt(page)));
+	__free_page(page);
 }
 
 /*
@@ -794,6 +948,12 @@ static struct kunit_case kfence_test_cases[] = {
 	KUNIT_CASE(test_memcache_typesafe_by_rcu),
 	KUNIT_CASE(test_krealloc),
 	KUNIT_CASE(test_memcache_alloc_bulk),
+	KUNIT_CASE(test_out_of_bounds_read_page),
+	KUNIT_CASE(test_out_of_bounds_write_page),
+	KUNIT_CASE(test_use_after_free_read_page),
+	KUNIT_CASE(test_kernel_stack),
+	KUNIT_CASE(test_vmalloc_page),
+	KUNIT_CASE(test_page_nokfence),
 	{},
 };
 
@@ -804,7 +964,7 @@ static int test_init(struct kunit *test)
 	unsigned long flags;
 	int i;
 
-	if (!__kfence_pool)
+	if (!kfence_pool_root.rb_node)
 		return -EINVAL;
 
 	spin_lock_irqsave(&observed.lock, flags);

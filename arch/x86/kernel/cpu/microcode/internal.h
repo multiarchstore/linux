@@ -8,43 +8,37 @@
 #include <asm/cpu.h>
 #include <asm/microcode.h>
 
-struct ucode_patch {
-	struct list_head plist;
-	void *data;		/* Intel uses only this one */
-	unsigned int size;
-	u32 patch_id;
-	u16 equiv_cpu;
-};
-
-extern struct list_head microcode_cache;
-
 struct device;
 
 enum ucode_state {
 	UCODE_OK	= 0,
 	UCODE_NEW,
+	UCODE_NEW_SAFE,
 	UCODE_UPDATED,
 	UCODE_NFOUND,
 	UCODE_ERROR,
+	UCODE_TIMEOUT,
+	UCODE_OFFLINE,
 };
 
 struct microcode_ops {
 	enum ucode_state (*request_microcode_fw)(int cpu, struct device *dev);
-
 	void (*microcode_fini_cpu)(int cpu);
 
 	/*
-	 * The generic 'microcode_core' part guarantees that
-	 * the callbacks below run on a target cpu when they
-	 * are being called.
+	 * The generic 'microcode_core' part guarantees that the callbacks
+	 * below run on a target CPU when they are being called.
 	 * See also the "Synchronization" section in microcode_core.c.
 	 */
-	enum ucode_state (*apply_microcode)(int cpu);
-	int (*collect_cpu_info)(int cpu, struct cpu_signature *csig);
+	enum ucode_state	(*apply_microcode)(int cpu);
+	int			(*collect_cpu_info)(int cpu, struct cpu_signature *csig);
+	void			(*finalize_late_load)(int result);
+	unsigned int		nmi_safe	: 1,
+				use_nmi		: 1;
 };
 
 extern struct ucode_cpu_info ucode_cpu_info[];
-struct cpio_data find_microcode_in_initrd(const char *path, bool use_pa);
+struct cpio_data find_microcode_in_initrd(const char *path);
 
 #define MAX_UCODE_COUNT 128
 
@@ -55,6 +49,9 @@ struct cpio_data find_microcode_in_initrd(const char *path, bool use_pa);
 #define CPUID_AMD1 QCHAR('A', 'u', 't', 'h')
 #define CPUID_AMD2 QCHAR('e', 'n', 't', 'i')
 #define CPUID_AMD3 QCHAR('c', 'A', 'M', 'D')
+#define CPUID_HYGON1 QCHAR('H', 'y', 'g', 'o')
+#define CPUID_HYGON2 QCHAR('n', 'G', 'e', 'n')
+#define CPUID_HYGON3 QCHAR('u', 'i', 'n', 'e')
 
 #define CPUID_IS(a, b, c, ebx, ecx, edx)	\
 		(!(((ebx) ^ (a)) | ((edx) ^ (b)) | ((ecx) ^ (c))))
@@ -81,6 +78,9 @@ static inline int x86_cpuid_vendor(void)
 	if (CPUID_IS(CPUID_AMD1, CPUID_AMD2, CPUID_AMD3, ebx, ecx, edx))
 		return X86_VENDOR_AMD;
 
+	if (CPUID_IS(CPUID_HYGON1, CPUID_HYGON2, CPUID_HYGON3, ebx, ecx, edx))
+		return X86_VENDOR_HYGON;
+
 	return X86_VENDOR_UNKNOWN;
 }
 
@@ -94,12 +94,12 @@ static inline unsigned int x86_cpuid_family(void)
 	return x86_family(eax);
 }
 
-extern bool initrd_gone;
+extern bool dis_ucode_ldr;
+extern bool force_minrev;
 
 #ifdef CONFIG_CPU_SUP_AMD
 void load_ucode_amd_bsp(unsigned int family);
 void load_ucode_amd_ap(unsigned int family);
-void load_ucode_amd_early(unsigned int cpuid_1_eax);
 int save_microcode_in_initrd_amd(unsigned int family);
 void reload_ucode_amd(unsigned int cpu);
 struct microcode_ops *init_amd_microcode(void);
@@ -107,23 +107,26 @@ void exit_amd_microcode(void);
 #else /* CONFIG_CPU_SUP_AMD */
 static inline void load_ucode_amd_bsp(unsigned int family) { }
 static inline void load_ucode_amd_ap(unsigned int family) { }
-static inline void load_ucode_amd_early(unsigned int family) { }
 static inline int save_microcode_in_initrd_amd(unsigned int family) { return -EINVAL; }
 static inline void reload_ucode_amd(unsigned int cpu) { }
 static inline struct microcode_ops *init_amd_microcode(void) { return NULL; }
 static inline void exit_amd_microcode(void) { }
 #endif /* !CONFIG_CPU_SUP_AMD */
 
+#ifdef CONFIG_CPU_SUP_HYGON
+const struct microcode_ops *init_hygon_microcode(void);
+#else /* CONFIG_CPU_SUP_HYGON */
+static const inline struct microcode_ops *init_hygon_microcode(void) { return NULL; }
+#endif /* !CONFIG_CPU_SUP_HYGON */
+
 #ifdef CONFIG_CPU_SUP_INTEL
 void load_ucode_intel_bsp(void);
 void load_ucode_intel_ap(void);
-int save_microcode_in_initrd_intel(void);
 void reload_ucode_intel(void);
 struct microcode_ops *init_intel_microcode(void);
 #else /* CONFIG_CPU_SUP_INTEL */
 static inline void load_ucode_intel_bsp(void) { }
 static inline void load_ucode_intel_ap(void) { }
-static inline int save_microcode_in_initrd_intel(void) { return -EINVAL; }
 static inline void reload_ucode_intel(void) { }
 static inline struct microcode_ops *init_intel_microcode(void) { return NULL; }
 #endif  /* !CONFIG_CPU_SUP_INTEL */

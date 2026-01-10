@@ -32,6 +32,9 @@
 #include <asm/dma.h>
 #include <linux/aer.h>
 #include <linux/bitfield.h>
+#ifdef CONFIG_MACH_LOONGSON64
+#include <linux/suspend.h>
+#endif
 #include "pci.h"
 
 DEFINE_MUTEX(pci_slot_mutex);
@@ -171,6 +174,15 @@ EXPORT_SYMBOL_GPL(pci_ats_disabled);
 static bool pci_bridge_d3_disable;
 /* Force bridge_d3 for all PCIe ports */
 static bool pci_bridge_d3_force;
+
+#ifdef CONFIG_MACH_LOONGSON64
+
+#ifndef CONFIG_PM_SLEEP
+suspend_state_t pm_suspend_target_state;
+#define pm_suspend_target_state (PM_SUSPEND_ON)
+#endif
+
+#endif
 
 static int __init pcie_port_pm_setup(char *str)
 {
@@ -4834,7 +4846,11 @@ int pcie_flr(struct pci_dev *dev)
 	 * 100ms, but may silently discard requests while the FLR is in
 	 * progress.  Wait 100ms before trying to access the device.
 	 */
+#ifdef CONFIG_SW64
+	msleep(1000);
+#else
 	msleep(100);
+#endif
 
 	return pci_dev_wait(dev, "FLR", PCIE_RESET_READY_POLL_MS);
 }
@@ -5221,6 +5237,69 @@ int pci_bridge_wait_for_secondary_bus(struct pci_dev *dev, char *reset_type)
 			    PCIE_RESET_READY_POLL_MS - delay);
 }
 
+static void pci_save_yitian710_regs(struct pci_dev *dev,
+				    struct pci_saved_regs *saved)
+{
+	int i;
+
+	/* if not yitian 710, should return here */
+	if (!dev->broken_bus_reset)
+		return;
+
+	/* save pcie type1 config space header*/
+	for (i = 0; i < 16; i++)
+		pci_read_config_dword(dev, i * 4, &dev->saved_config_space[i]);
+
+	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &saved->dev_ctrl);
+	pcie_capability_read_word(dev, PCI_EXP_RTCTL, &saved->root_ctrl);
+	pcie_capability_read_word(dev, PCI_EXP_DEVCTL2, &saved->dev_ctrl2);
+
+	if (dev->acs_cap)
+		pci_read_config_dword(dev, dev->acs_cap + PCI_ACS_CAP,
+				      &saved->acs_cap_ctrl);
+
+#ifdef CONFIG_PCIEAER
+	if (dev->aer_cap)
+		pci_read_config_dword(dev, dev->aer_cap + PCI_ERR_ROOT_COMMAND,
+				      &saved->root_err_cmd);
+#endif
+
+	pcie_capability_read_word(dev, PCI_EXP_SLTCTL, &saved->slot_ctrl);
+}
+
+static void pci_restore_yitian710_regs(struct pci_dev *dev,
+				       struct pci_saved_regs *saved)
+{
+	if (!dev->broken_bus_reset)
+		return;
+
+	/* restore pcie type1 config space header */
+	pci_restore_config_space_range(dev, 0, 15, 0, false);
+
+	/*
+	 * restore Device Control, Root Control Register and Device Control 2
+	 * in PCI Express Capability
+	 */
+	pcie_capability_write_word(dev, PCI_EXP_DEVCTL, saved->dev_ctrl);
+	pcie_capability_write_word(dev, PCI_EXP_RTCTL, saved->root_ctrl);
+	pcie_capability_write_word(dev, PCI_EXP_DEVCTL2, saved->dev_ctrl2);
+
+	/* restore ACS Capability Register */
+	if (dev->acs_cap)
+		pci_write_config_dword(dev, dev->acs_cap + PCI_ACS_CAP,
+				       saved->acs_cap_ctrl);
+
+#ifdef CONFIG_PCIEAER
+	/* restore AER Root Error Command Register */
+	if (dev->aer_cap)
+		pci_write_config_dword(dev, dev->aer_cap + PCI_ERR_ROOT_COMMAND,
+				       saved->root_err_cmd);
+#endif
+
+	/* restore Slot Control Register */
+	pcie_capability_write_word(dev, PCI_EXP_SLTCTL, saved->slot_ctrl);
+}
+
 void pci_reset_secondary_bus(struct pci_dev *dev)
 {
 	u16 ctrl;
@@ -5253,9 +5332,18 @@ void __weak pcibios_reset_secondary_bus(struct pci_dev *dev)
  */
 int pci_bridge_secondary_bus_reset(struct pci_dev *dev)
 {
-	pcibios_reset_secondary_bus(dev);
+	int rc;
+	struct pci_saved_regs saved = { };
 
-	return pci_bridge_wait_for_secondary_bus(dev, "bus reset");
+	/* save key regs for yitian710 during bus rest*/
+	pci_save_yitian710_regs(dev, &saved);
+
+	pcibios_reset_secondary_bus(dev);
+	rc = pci_bridge_wait_for_secondary_bus(dev, "bus reset");
+
+	/* restore regs for yitian710*/
+	pci_restore_yitian710_regs(dev, &saved);
+	return rc;
 }
 EXPORT_SYMBOL_GPL(pci_bridge_secondary_bus_reset);
 
@@ -6210,8 +6298,9 @@ int pcie_set_readrq(struct pci_dev *dev, int rq)
 {
 	u16 v;
 	int ret;
+#ifdef CONFIG_MACH_LOONGSON64
 	struct pci_host_bridge *bridge = pci_find_host_bridge(dev->bus);
-
+#endif
 	if (rq < 128 || rq > 4096 || !is_power_of_2(rq))
 		return -EINVAL;
 
@@ -6229,7 +6318,9 @@ int pcie_set_readrq(struct pci_dev *dev, int rq)
 
 	v = (ffs(rq) - 8) << 12;
 
-	if (bridge->no_inc_mrrs) {
+#ifdef CONFIG_MACH_LOONGSON64
+	if (pm_suspend_target_state == PM_SUSPEND_ON &&
+		bridge->no_inc_mrrs) {
 		int max_mrrs = pcie_get_readrq(dev);
 
 		if (rq > max_mrrs) {
@@ -6237,6 +6328,7 @@ int pcie_set_readrq(struct pci_dev *dev, int rq)
 			return -EINVAL;
 		}
 	}
+#endif
 
 	ret = pcie_capability_clear_and_set_word(dev, PCI_EXP_DEVCTL,
 						  PCI_EXP_DEVCTL_READRQ, v);

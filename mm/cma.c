@@ -36,7 +36,10 @@
 #include "internal.h"
 #include "cma.h"
 
-struct cma cma_areas[MAX_CMA_AREAS];
+static struct cma cma_areas_data[MAX_CMA_AREAS];
+static unsigned int cma_areas_size = MAX_CMA_AREAS;
+struct cma *cma_areas = cma_areas_data;
+
 unsigned cma_area_count;
 static DEFINE_MUTEX(cma_mutex);
 
@@ -159,6 +162,25 @@ void __init cma_reserve_pages_on_error(struct cma *cma)
 	cma->reserve_pages_on_error = true;
 }
 
+int __init cma_alloc_areas(unsigned int max_cma_size)
+{
+	struct cma *data;
+
+	if (max_cma_size <= MAX_CMA_AREAS)
+		return 0;
+
+	if (cma_area_count || cma_areas != cma_areas_data)
+		return -EPERM;
+
+	data = memblock_alloc(max_cma_size * sizeof(*cma_areas), SMP_CACHE_BYTES);
+	if (!data)
+		return -ENOMEM;
+
+	cma_areas = data;
+	cma_areas_size = max_cma_size;
+	return 0;
+}
+
 /**
  * cma_init_reserved_mem() - create custom contiguous area from reserved memory
  * @base: Base address of the reserved area
@@ -179,7 +201,7 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	struct cma *cma;
 
 	/* Sanity checks */
-	if (cma_area_count == ARRAY_SIZE(cma_areas)) {
+	if (cma_area_count == cma_areas_size) {
 		pr_err("Not enough slots for CMA reserved regions!\n");
 		return -ENOSPC;
 	}
@@ -252,7 +274,7 @@ int __init cma_declare_contiguous_nid(phys_addr_t base,
 	pr_debug("%s(size %pa, base %pa, limit %pa alignment %pa)\n",
 		__func__, &size, &base, &limit, &alignment);
 
-	if (cma_area_count == ARRAY_SIZE(cma_areas)) {
+	if (cma_area_count == cma_areas_size) {
 		pr_err("Not enough slots for CMA reserved regions!\n");
 		return -ENOSPC;
 	}
@@ -470,10 +492,12 @@ struct page *cma_alloc(struct cma *cma, unsigned long count,
 		spin_unlock_irq(&cma->lock);
 
 		pfn = cma->base_pfn + (bitmap_no << cma->order_per_bit);
-		mutex_lock(&cma_mutex);
+		if (!cma->no_mutex)
+			mutex_lock(&cma_mutex);
 		ret = alloc_contig_range(pfn, pfn + count, MIGRATE_CMA,
 				     GFP_KERNEL | (no_warn ? __GFP_NOWARN : 0));
-		mutex_unlock(&cma_mutex);
+		if (!cma->no_mutex)
+			mutex_unlock(&cma_mutex);
 		if (ret == 0) {
 			page = pfn_to_page(pfn);
 			break;
@@ -586,4 +610,12 @@ int cma_for_each_area(int (*it)(struct cma *cma, void *data), void *data)
 	}
 
 	return 0;
+}
+
+void cma_enable_concurrency(struct cma *cma)
+{
+	if (!cma)
+		return;
+
+	cma->no_mutex = true;
 }

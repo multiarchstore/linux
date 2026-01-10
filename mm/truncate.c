@@ -469,6 +469,14 @@ void truncate_inode_pages_final(struct address_space *mapping)
 	 */
 	mapping_set_exiting(mapping);
 
+	/* Flush fast reflink work if any. */
+	if (unlikely(mapping->fast_reflink_work)) {
+		flush_work(&mapping->fast_reflink_work->work);
+
+		kfree(mapping->fast_reflink_work);
+		mapping->fast_reflink_work = NULL;
+	}
+
 	if (!mapping_empty(mapping)) {
 		/*
 		 * As truncation uses a lockless tree lookup, cycle

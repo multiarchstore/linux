@@ -497,7 +497,10 @@ struct jbd2_journal_handle
 	unsigned int	h_type:		8;
 	unsigned int	h_line_no:	16;
 
+	unsigned long		h_pre_start_jiffies;
 	unsigned long		h_start_jiffies;
+	u64			h_sched_wait_sum;
+	u64			h_io_wait_sum;
 	unsigned int		h_requested_credits;
 
 	unsigned int		saved_alloc_context;
@@ -706,6 +709,9 @@ struct transaction_s
 	 * structures associated with the transaction
 	 */
 	struct list_head	t_private_list;
+
+	/* When this transaction is locked */
+	unsigned long           t_locked_time;
 };
 
 struct transaction_run_stats_s {
@@ -843,6 +849,16 @@ struct journal_s
 	 * @j_wait_commit: Wait queue to trigger commit.
 	 */
 	wait_queue_head_t	j_wait_commit;
+
+	/**
+	 * @j_wait_done_checkpoint: Wait queue for waiting for checkpoint to complete.
+	 */
+	wait_queue_head_t	j_wait_done_checkpoint;
+
+	/**
+	 * @j_wait_checkpoint: Wait queue to trigger checkpointing.
+	 */
+	wait_queue_head_t	j_wait_checkpoint;
 
 	/**
 	 * @j_wait_updates: Wait queue to wait for updates to complete.
@@ -1207,6 +1223,13 @@ struct journal_s
 	int			(*j_finish_inode_data_buffers)
 					(struct jbd2_inode *);
 
+	/**
+	 * @j_checkpoint_task:
+	 *
+	 * Pointer to the current checkpoint thread for this journal.
+	 */
+	struct task_struct	*j_checkpoint_task;
+
 	/*
 	 * Journal statistics
 	 */
@@ -1225,6 +1248,20 @@ struct journal_s
 	 * @j_stats: Overall statistics.
 	 */
 	struct transaction_stats_s j_stats;
+
+	/**
+	 * @j_force_copy: if not zero, force to do buffer copy-out.
+	 */
+	unsigned int j_force_copy;
+
+	/**
+	 * @j_stall_thresh: when transaction is locked and there are still
+	 * outstanding handles, such handles will prevent transaction
+	 * committing, trace these handles if they have stalled the transaction
+	 * for @j_stall_thresh time, unit is millisecond, default 100ms.
+	 */
+#define	JBD2_DEFAULT_TRANS_STALL_THRESH	100
+	unsigned long j_stall_thresh;
 
 	/**
 	 * @j_failed_commit: Failed journal commit ID.

@@ -31,12 +31,13 @@
 #include <linux/pid_namespace.h>
 #include <linux/refcount.h>
 #include <linux/user_namespace.h>
+#include <linux/miscdevice.h>
 
 /** Default max number of pages that can be used in a single read request */
 #define FUSE_DEFAULT_MAX_PAGES_PER_REQ 32
 
 /** Maximum of max_pages received in init_out */
-#define FUSE_MAX_MAX_PAGES 256
+#define FUSE_MAX_MAX_PAGES 1024
 
 /** Bias for fi->writectr, meaning new writepages must not be sent */
 #define FUSE_NOWRITE INT_MIN
@@ -111,7 +112,7 @@ struct fuse_inode {
 	u64 attr_version;
 
 	union {
-		/* Write related fields (regular file only) */
+		/* read/write io cache (regular file only) */
 		struct {
 			/* Files usable in writepage.  Protected by fi->lock */
 			struct list_head write_files;
@@ -123,8 +124,14 @@ struct fuse_inode {
 			 * (FUSE_NOWRITE) means more writes are blocked */
 			int writectr;
 
+			/** Number of files/maps using page cache */
+			int iocachectr;
+
 			/* Waitq for writepage completion */
 			wait_queue_head_t page_waitq;
+
+			/* waitq for direct-io completion */
+			wait_queue_head_t direct_io_waitq;
 
 			/* List of writepage requestst (pending or sent) */
 			struct rb_root writepages;
@@ -187,6 +194,8 @@ enum {
 	FUSE_I_BAD,
 	/* Has btime */
 	FUSE_I_BTIME,
+	/* Wants or already has page cache IO */
+	FUSE_I_CACHE_IO_MODE,
 };
 
 struct fuse_conn;
@@ -221,12 +230,6 @@ struct fuse_file {
 
 	/* Readdir related */
 	struct {
-		/*
-		 * Protects below fields against (crazy) parallel readdir on
-		 * same open file.  Uncontended in the normal case.
-		 */
-		struct mutex lock;
-
 		/* Dir stream position */
 		loff_t pos;
 
@@ -243,6 +246,9 @@ struct fuse_file {
 
 	/** Wait queue head for poll */
 	wait_queue_head_t poll_wait;
+
+	/** Does file hold a fi->iocachectr refcount? */
+	enum { IOM_NONE, IOM_CACHED, IOM_UNCACHED } iomode;
 
 	/** Has flock been performed on this file? */
 	bool flock:1;
@@ -283,6 +289,7 @@ struct fuse_args {
 	bool page_replace:1;
 	bool may_block:1;
 	bool is_ext:1;
+	bool is_pinned:1;
 	struct fuse_in_arg in_args[3];
 	struct fuse_arg out_args[2];
 	void (*end)(struct fuse_mount *fm, struct fuse_args *args, int error);
@@ -410,22 +417,19 @@ struct fuse_iqueue;
  */
 struct fuse_iqueue_ops {
 	/**
-	 * Signal that a forget has been queued
+	 * Send one forget
 	 */
-	void (*wake_forget_and_unlock)(struct fuse_iqueue *fiq)
-		__releases(fiq->lock);
+	void (*send_forget)(struct fuse_iqueue *fiq, struct fuse_forget_link *link);
 
 	/**
-	 * Signal that an INTERRUPT request has been queued
+	 * Send interrupt for request
 	 */
-	void (*wake_interrupt_and_unlock)(struct fuse_iqueue *fiq)
-		__releases(fiq->lock);
+	void (*send_interrupt)(struct fuse_iqueue *fiq, struct fuse_req *req);
 
 	/**
-	 * Signal that a request has been queued
+	 * Send one request
 	 */
-	void (*wake_pending_and_unlock)(struct fuse_iqueue *fiq)
-		__releases(fiq->lock);
+	void (*send_req)(struct fuse_iqueue *fiq, struct fuse_req *req);
 
 	/**
 	 * Clean up when fuse_iqueue is destroyed
@@ -824,7 +828,7 @@ struct fuse_conn {
 	/** Negotiated minor version */
 	unsigned minor;
 
-	/** Entry on the fuse_mount_list */
+	/** Entry on the fuse_conn_list */
 	struct list_head entry;
 
 	/** Device ID from the root super block */
@@ -1003,10 +1007,6 @@ void fuse_queue_forget(struct fuse_conn *fc, struct fuse_forget_link *forget,
 
 struct fuse_forget_link *fuse_alloc_forget(void);
 
-struct fuse_forget_link *fuse_dequeue_forget(struct fuse_iqueue *fiq,
-					     unsigned int max,
-					     unsigned int *countp);
-
 /*
  * Initialize READ or READDIR request
  */
@@ -1031,14 +1031,9 @@ void fuse_read_args_fill(struct fuse_io_args *ia, struct file *file, loff_t pos,
 			 size_t count, int opcode);
 
 
-/**
- * Send OPEN or OPENDIR request
- */
-int fuse_open_common(struct inode *inode, struct file *file, bool isdir);
-
-struct fuse_file *fuse_file_alloc(struct fuse_mount *fm);
+struct fuse_file *fuse_file_alloc(struct fuse_mount *fm, bool release);
 void fuse_file_free(struct fuse_file *ff);
-void fuse_finish_open(struct inode *inode, struct file *file);
+int fuse_finish_open(struct inode *inode, struct file *file);
 
 void fuse_sync_release(struct fuse_inode *fi, struct fuse_file *ff,
 		       unsigned int flags);
@@ -1348,11 +1343,30 @@ int fuse_fileattr_get(struct dentry *dentry, struct fileattr *fa);
 int fuse_fileattr_set(struct mnt_idmap *idmap,
 		      struct dentry *dentry, struct fileattr *fa);
 
-/* file.c */
+/* iomode.c */
+int fuse_file_cached_io_start(struct inode *inode, struct fuse_file *ff);
+int fuse_file_uncached_io_start(struct inode *inode, struct fuse_file *ff);
+void fuse_file_uncached_io_end(struct inode *inode, struct fuse_file *ff);
 
+int fuse_file_io_open(struct file *file, struct inode *inode);
+void fuse_file_io_release(struct fuse_file *ff, struct inode *inode);
+
+/* file.c */
 struct fuse_file *fuse_file_open(struct fuse_mount *fm, u64 nodeid,
 				 unsigned int open_flags, bool isdir);
 void fuse_file_release(struct inode *inode, struct fuse_file *ff,
 		       unsigned int open_flags, fl_owner_t id, bool isdir);
+
+typedef int (*fuse_mount_cb_t)(struct file *file);
+extern fuse_mount_cb_t fuse_mount_callback;
+
+#if IS_ENABLED(CONFIG_VIRT_FUSE)
+static inline bool is_virtfuse_device(struct file *file)
+{
+	return iminor(file_inode(file)) != FUSE_MINOR;
+}
+#else
+static inline bool is_virtfuse_device(struct file *file) { return false; }
+#endif
 
 #endif /* _FS_FUSE_I_H */

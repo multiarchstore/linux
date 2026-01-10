@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _NET_DST_OPS_H
 #define _NET_DST_OPS_H
+#include <linux/ck_kabi.h>
 #include <linux/types.h>
 #include <linux/percpu_counter.h>
 #include <linux/cache.h>
@@ -41,6 +42,15 @@ struct dst_ops {
 	struct kmem_cache	*kmem_cachep;
 
 	struct percpu_counter	pcpuc_entries ____cacheline_aligned_in_smp;
+
+	CK_KABI_RESERVE(1)
+	CK_KABI_RESERVE(2)
+	CK_KABI_RESERVE(3)
+	CK_KABI_RESERVE(4)
+	CK_KABI_RESERVE(5)
+	CK_KABI_RESERVE(6)
+	CK_KABI_RESERVE(7)
+	CK_KABI_RESERVE(8)
 };
 
 static inline int dst_entries_get_fast(struct dst_ops *dst)

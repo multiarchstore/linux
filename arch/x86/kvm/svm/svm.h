@@ -203,6 +203,11 @@ struct vcpu_sev_es_state {
 	u32 ghcb_sa_len;
 	bool ghcb_sa_sync;
 	bool ghcb_sa_free;
+
+	/* CSV2 migrated ghcb mapping state support */
+	bool receiver_ghcb_map_fail;
+	/* CSV2 reboot vmsa */
+	struct vmcb_save_area *reset_vmsa;
 };
 
 struct vcpu_svm {
@@ -667,6 +672,44 @@ void avic_refresh_virtual_apic_mode(struct kvm_vcpu *vcpu);
 #define GHCB_VERSION_MAX	1ULL
 #define GHCB_VERSION_MIN	1ULL
 
+/*
+ * CSV2 live migration support:
+ *     If MSR_AMD64_SEV_ES_GHCB in migration didn't apply GHCB MSR protocol,
+ *     reuse bits [52-63] to indicate vcpu status. The following status are
+ *     currently included:
+ *         * ghcb_map: indicate whether GHCB page was mapped. The mapped GHCB
+ *                     page may be filled with GPRs before VMRUN, so we must
+ *                     remap GHCB page on the recipient's side.
+ *         * received_first_sipi: indicate AP's INIT-SIPI-SIPI stage. Reuse
+ *                     these bits for received_first_sipi is acceptable cause
+ *                     runtime stage of guest's linux only applies GHCB page
+ *                     protocol.
+ *                     It's unlikely that the migration encounter other stages
+ *                     of guest's linux. Once encountered, AP bringup may fail
+ *                     which will not impact user payload.
+ *     Otherbits keep their's original meaning. (See GHCB Spec 2.3.1 for detail)
+ */
+#define GHCB_MSR_KVM_STATUS_POS		52
+#define GHCB_MSR_KVM_STATUS_BITS	12
+#define GHCB_MSR_KVM_STATUS_MASK			\
+	((BIT_ULL(GHCB_MSR_KVM_STATUS_BITS) - 1)	\
+			<< GHCB_MSR_KVM_STATUS_POS)
+#define GHCB_MSR_MAPPED_POS		63
+#define GHCB_MSR_MAPPED_BITS		1
+#define GHCB_MSR_MAPPED_MASK				\
+	((BIT_ULL(GHCB_MSR_MAPPED_BITS) - 1)		\
+			 << GHCB_MSR_MAPPED_POS)
+#define GHCB_MSR_RECEIVED_FIRST_SIPI_POS	62
+#define GHCB_MSR_RECEIVED_FIRST_SIPI_BITS	1
+#define GHCB_MSR_RECEIVED_FIRST_SIPI_MASK			\
+	((BIT_ULL(GHCB_MSR_RECEIVED_FIRST_SIPI_BITS) - 1)	\
+			 << GHCB_MSR_RECEIVED_FIRST_SIPI_POS)
+
+
+static inline bool is_ghcb_msr_protocol(u64 ghcb_val)
+{
+	return ghcb_val & GHCB_MSR_INFO_MASK;
+}
 
 extern unsigned int max_sev_asid;
 
@@ -694,6 +737,12 @@ void sev_es_vcpu_reset(struct vcpu_svm *svm);
 void sev_vcpu_deliver_sipi_vector(struct kvm_vcpu *vcpu, u8 vector);
 void sev_es_prepare_switch_to_guest(struct sev_es_save_area *hostsa);
 void sev_es_unmap_ghcb(struct vcpu_svm *svm);
+
+int sev_vm_attestation(struct kvm *kvm, unsigned long gpa, unsigned long len);
+int sev_es_ghcb_map(struct vcpu_svm *svm, u64 ghcb_gpa);
+
+int csv_control_pre_system_reset(struct kvm *kvm);
+int csv_control_post_system_reset(struct kvm *kvm);
 
 /* vmenter.S */
 

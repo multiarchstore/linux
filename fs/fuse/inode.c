@@ -63,6 +63,9 @@ MODULE_PARM_DESC(max_user_congthresh,
 static struct file_system_type fuseblk_fs_type;
 #endif
 
+fuse_mount_cb_t fuse_mount_callback;
+EXPORT_SYMBOL_GPL(fuse_mount_callback);
+
 struct fuse_forget_link *fuse_alloc_forget(void)
 {
 	return kzalloc(sizeof(struct fuse_forget_link), GFP_KERNEL_ACCOUNT);
@@ -996,7 +999,7 @@ static struct inode *fuse_get_root_inode(struct super_block *sb, unsigned mode)
 	attr.mode = mode;
 	attr.ino = FUSE_ROOT_ID;
 	attr.nlink = 1;
-	return fuse_iget(sb, 1, 0, &attr, 0, 0);
+	return fuse_iget(sb, FUSE_ROOT_ID, 0, &attr, 0, 0);
 }
 
 struct fuse_inode_handle {
@@ -1137,6 +1140,11 @@ static struct dentry *fuse_get_parent(struct dentry *child)
 
 	return parent;
 }
+
+/* only for fid encoding; no support for file handle */
+static const struct export_operations fuse_export_fid_operations = {
+	.encode_fh	= fuse_encode_fh,
+};
 
 static const struct export_operations fuse_export_operations = {
 	.fh_to_dentry	= fuse_fh_to_dentry,
@@ -1312,6 +1320,10 @@ static void process_init_reply(struct fuse_mount *fm, struct fuse_args *args,
 				fc->create_supp_group = 1;
 			if (flags & FUSE_DIRECT_IO_ALLOW_MMAP)
 				fc->direct_io_allow_mmap = 1;
+			if (flags & FUSE_NO_EXPORT_SUPPORT)
+				fm->sb->s_export_op = &fuse_export_fid_operations;
+			if (flags & FUSE_DELETE_STALE)
+				fc->delete_stale = 1;
 		} else {
 			ra_pages = fc->max_read / PAGE_SIZE;
 			fc->no_lock = 1;
@@ -1358,7 +1370,9 @@ void fuse_send_init(struct fuse_mount *fm)
 		FUSE_NO_OPENDIR_SUPPORT | FUSE_EXPLICIT_INVAL_DATA |
 		FUSE_HANDLE_KILLPRIV_V2 | FUSE_SETXATTR_EXT | FUSE_INIT_EXT |
 		FUSE_SECURITY_CTX | FUSE_CREATE_SUPP_GROUP |
-		FUSE_HAS_EXPIRE_ONLY | FUSE_DIRECT_IO_ALLOW_MMAP;
+		FUSE_HAS_EXPIRE_ONLY | FUSE_DIRECT_IO_ALLOW_MMAP |
+		FUSE_NO_EXPORT_SUPPORT | FUSE_HAS_RESEND |
+		FUSE_DELETE_STALE;
 #ifdef CONFIG_FUSE_DAX
 	if (fm->fc->dax)
 		flags |= FUSE_MAP_ALIGNMENT;
@@ -1515,8 +1529,8 @@ static void fuse_fill_attr_from_inode(struct fuse_attr *attr,
 		.ctimensec	= ctime.tv_nsec,
 		.mode		= fi->inode.i_mode,
 		.nlink		= fi->inode.i_nlink,
-		.uid		= fi->inode.i_uid.val,
-		.gid		= fi->inode.i_gid.val,
+		.uid		= __kuid_val(fi->inode.i_uid),
+		.gid		= __kgid_val(fi->inode.i_gid),
 		.rdev		= fi->inode.i_rdev,
 		.blksize	= 1u << fi->inode.i_blkbits,
 	};
@@ -1553,6 +1567,7 @@ static int fuse_fill_super_submount(struct super_block *sb,
 	sb->s_bdi = bdi_get(parent_sb->s_bdi);
 
 	sb->s_xattr = parent_sb->s_xattr;
+	sb->s_export_op = parent_sb->s_export_op;
 	sb->s_time_gran = parent_sb->s_time_gran;
 	sb->s_blocksize = parent_sb->s_blocksize;
 	sb->s_blocksize_bits = parent_sb->s_blocksize_bits;
@@ -1753,10 +1768,12 @@ static int fuse_fill_super(struct super_block *sb, struct fs_context *fsc)
 
 	/*
 	 * Require mount to happen from the same user namespace which
-	 * opened /dev/fuse to prevent potential attacks.
+	 * opened /dev/fuse to prevent potential attacks.  While for
+	 * virtual fuse, the mount is always bound to init_user_ns.
 	 */
-	if ((ctx->file->f_op != &fuse_dev_operations) ||
-	    (ctx->file->f_cred->user_ns != sb->s_user_ns))
+	if (!is_virtfuse_device(ctx->file) &&
+	    ((ctx->file->f_op != &fuse_dev_operations) ||
+	     (ctx->file->f_cred->user_ns != sb->s_user_ns)))
 		return -EINVAL;
 	ctx->fudptr = &ctx->file->private_data;
 
@@ -1791,6 +1808,7 @@ static int fuse_get_tree(struct fs_context *fsc)
 	struct fuse_conn *fc;
 	struct fuse_mount *fm;
 	struct super_block *sb;
+	bool is_virtfuse;
 	int err;
 
 	fc = kmalloc(sizeof(*fc), GFP_KERNEL);
@@ -1827,15 +1845,28 @@ static int fuse_get_tree(struct fs_context *fsc)
 	 * Allow creating a fuse mount with an already initialized fuse
 	 * connection
 	 */
+	is_virtfuse = is_virtfuse_device(ctx->file);
 	fud = READ_ONCE(ctx->file->private_data);
-	if (ctx->file->f_op == &fuse_dev_operations && fud) {
+	if ((ctx->file->f_op == &fuse_dev_operations || is_virtfuse) && fud) {
 		fsc->sget_key = fud->fc;
 		sb = sget_fc(fsc, fuse_test_super, fuse_set_no_super);
 		err = PTR_ERR_OR_ZERO(sb);
 		if (!IS_ERR(sb))
 			fsc->root = dget(sb->s_root);
 	} else {
+		/* bind sb to init_user_ns for virtfuse */
+		if (is_virtfuse)
+			fsc->global = true;
 		err = get_tree_nodev(fsc, fuse_fill_super);
+	}
+
+	if (is_virtfuse && !err) {
+		if (WARN_ON(!fuse_mount_callback))
+			err = -EINVAL;
+		else
+			err = fuse_mount_callback(ctx->file);
+		if (err)
+			fc_drop_locked(fsc);
 	}
 out:
 	if (fsc->s_fs_info)

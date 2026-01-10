@@ -25,6 +25,7 @@
 #include <linux/vmalloc.h>
 #include <linux/set_memory.h>
 #include <linux/kfence.h>
+#include <linux/stop_machine.h>
 
 #include <asm/barrier.h>
 #include <asm/cputype.h>
@@ -40,10 +41,6 @@
 #include <asm/tlbflush.h>
 #include <asm/pgalloc.h>
 #include <asm/kfence.h>
-
-#define NO_BLOCK_MAPPINGS	BIT(0)
-#define NO_CONT_MAPPINGS	BIT(1)
-#define NO_EXEC_MAPPINGS	BIT(2)	/* assumes FEAT_HPDS is not used */
 
 int idmap_t0sz __ro_after_init;
 
@@ -75,6 +72,15 @@ EXPORT_SYMBOL(empty_zero_page);
 
 static DEFINE_SPINLOCK(swapper_pgdir_lock);
 static DEFINE_MUTEX(fixmap_lock);
+static DEFINE_MUTEX(split_linear_mapping_lock);
+
+static struct split_memory_params {
+	unsigned long virt;
+	phys_addr_t size;
+	pgprot_t prot;
+
+	atomic_t cpu_count;
+} split_memory_param;
 
 void set_swapper_pgd(pgd_t *pgdp, pgd_t pgd)
 {
@@ -169,6 +175,49 @@ bool pgattr_change_is_safe(u64 old, u64 new)
 	return ((old ^ new) & ~mask) == 0;
 }
 
+/*
+ * If the physical address of block-mapping pud/pmd or contiguous mapping pmd/pte
+ * entry is located in the physical range it points to, clearing the entry would
+ * cause the corresponding physcial range can not be accessed any longer. The
+ * remapping process of this range can not be done because of inaccessible.
+ * For this case, it should be mapped with PTE level when initializing the page
+ * table.
+ */
+static bool should_clear_cont_pte(pmd_t *pmdp, unsigned long addr, phys_addr_t phys)
+{
+	phys_addr_t pa = pte_offset_phys(pmdp, addr);
+
+	return (pa >> CONT_PTE_SHIFT) == (phys >> CONT_PTE_SHIFT);
+}
+
+static bool should_clear_cont_pmd(pud_t *pudp, unsigned long addr, phys_addr_t phys)
+{
+	phys_addr_t pa = pmd_offset_phys(pudp, addr);
+
+	return (pa >> CONT_PMD_SHIFT) == (phys >> CONT_PMD_SHIFT);
+}
+
+static bool should_split_pmd(pud_t *pudp, unsigned long addr, phys_addr_t phys)
+{
+	phys_addr_t pa = pmd_offset_phys(pudp, addr);
+
+	return (pa >> PMD_SHIFT) == (phys >> PMD_SHIFT);
+}
+
+#ifndef __PAGETABLE_PUD_FOLDED
+static bool should_split_pud(p4d_t *p4dp, unsigned long addr, phys_addr_t phys)
+{
+	phys_addr_t pa = pud_offset_phys(p4dp, addr);
+
+	return (pa >> PUD_SHIFT) == (phys >> PUD_SHIFT);
+}
+#else
+static bool should_split_pud(p4d_t *p4dp, unsigned long addr, phys_addr_t phys)
+{
+	return false;
+}
+#endif
+
 static void init_pte(pmd_t *pmdp, unsigned long addr, unsigned long end,
 		     phys_addr_t phys, pgprot_t prot)
 {
@@ -176,16 +225,16 @@ static void init_pte(pmd_t *pmdp, unsigned long addr, unsigned long end,
 
 	ptep = pte_set_fixmap_offset(pmdp, addr);
 	do {
-		pte_t old_pte = READ_ONCE(*ptep);
+		pte_t old_pte = __ptep_get(ptep);
 
-		set_pte(ptep, pfn_pte(__phys_to_pfn(phys), prot));
+		__set_pte(ptep, pfn_pte(__phys_to_pfn(phys), prot));
 
 		/*
 		 * After the PTE entry has been populated once, we
 		 * only allow updates to the permission attributes.
 		 */
 		BUG_ON(!pgattr_change_is_safe(pte_val(old_pte),
-					      READ_ONCE(pte_val(*ptep))));
+					      pte_val(__ptep_get(ptep))));
 
 		phys += PAGE_SIZE;
 	} while (ptep++, addr += PAGE_SIZE, addr != end);
@@ -223,7 +272,8 @@ static void alloc_init_cont_pte(pmd_t *pmdp, unsigned long addr,
 
 		/* use a contiguous mapping if the range is suitably aligned */
 		if ((((addr | next | phys) & ~CONT_PTE_MASK) == 0) &&
-		    (flags & NO_CONT_MAPPINGS) == 0)
+		    (flags & NO_CONT_MAPPINGS) == 0 &&
+		    !should_clear_cont_pte(pmdp, addr, phys))
 			__prot = __pgprot(pgprot_val(prot) | PTE_CONT);
 
 		init_pte(pmdp, addr, next, phys, __prot);
@@ -240,6 +290,14 @@ static void init_pmd(pud_t *pudp, unsigned long addr, unsigned long end,
 	pmd_t *pmdp;
 
 	pmdp = pmd_set_fixmap_offset(pudp, addr);
+	/*
+	 * the physical address of PMDs with contiguous flag might locate in the
+	 * physical range they point to. Thus clear the CONT flag earlier to
+	 * avoid inaccessiable situation.
+	 */
+	if (should_clear_cont_pmd(pudp, addr, phys))
+		prot = __pgprot(pgprot_val(prot) & ~PTE_CONT);
+
 	do {
 		pmd_t old_pmd = READ_ONCE(*pmdp);
 
@@ -247,7 +305,8 @@ static void init_pmd(pud_t *pudp, unsigned long addr, unsigned long end,
 
 		/* try section mapping first */
 		if (((addr | next | phys) & ~PMD_MASK) == 0 &&
-		    (flags & NO_BLOCK_MAPPINGS) == 0) {
+		    (flags & NO_BLOCK_MAPPINGS) == 0 &&
+		    !should_split_pmd(pudp, addr, phys)) {
 			pmd_set_huge(pmdp, phys, prot);
 
 			/*
@@ -340,11 +399,14 @@ static void alloc_init_pud(pgd_t *pgdp, unsigned long addr, unsigned long end,
 		next = pud_addr_end(addr, end);
 
 		/*
-		 * For 4K granule only, attempt to put down a 1GB block
+		 * For 4K granule only, attempt to put down a 1GB block. If the
+		 * physical address of pudp is included in the range where
+		 * itself points to, split the block of pudp earlier.
 		 */
 		if (pud_sect_supported() &&
 		   ((addr | next | phys) & ~PUD_MASK) == 0 &&
-		    (flags & NO_BLOCK_MAPPINGS) == 0) {
+		    (flags & NO_BLOCK_MAPPINGS) == 0 &&
+		    !should_split_pud(p4dp, addr, phys)) {
 			pud_set_huge(pudp, phys, prot);
 
 			/*
@@ -511,6 +573,9 @@ void __init mark_linear_text_alias_ro(void)
 
 #ifdef CONFIG_KFENCE
 
+static unsigned long __ro_after_init
+kfence_pool_size = ((CONFIG_KFENCE_NUM_OBJECTS + 1) * 2 * PAGE_SIZE);
+
 bool __ro_after_init kfence_early_init = !!CONFIG_KFENCE_SAMPLE_INTERVAL;
 
 /* early_param() will be parsed before map_mem() below. */
@@ -531,7 +596,7 @@ static phys_addr_t __init arm64_kfence_alloc_pool(void)
 	if (!kfence_early_init)
 		return 0;
 
-	kfence_pool = memblock_phys_alloc(KFENCE_POOL_SIZE, PAGE_SIZE);
+	kfence_pool = memblock_phys_alloc(kfence_pool_size, PAGE_SIZE);
 	if (!kfence_pool) {
 		pr_err("failed to allocate kfence pool\n");
 		kfence_early_init = false;
@@ -539,7 +604,7 @@ static phys_addr_t __init arm64_kfence_alloc_pool(void)
 	}
 
 	/* Temporarily mark as NOMAP. */
-	memblock_mark_nomap(kfence_pool, KFENCE_POOL_SIZE);
+	memblock_mark_nomap(kfence_pool, kfence_pool_size);
 
 	return kfence_pool;
 }
@@ -550,11 +615,11 @@ static void __init arm64_kfence_map_pool(phys_addr_t kfence_pool, pgd_t *pgdp)
 		return;
 
 	/* KFENCE pool needs page-level mapping. */
-	__map_memblock(pgdp, kfence_pool, kfence_pool + KFENCE_POOL_SIZE,
+	__map_memblock(pgdp, kfence_pool, kfence_pool + kfence_pool_size,
 			pgprot_tagged(PAGE_KERNEL),
-			NO_BLOCK_MAPPINGS | NO_CONT_MAPPINGS);
-	memblock_clear_nomap(kfence_pool, KFENCE_POOL_SIZE);
-	__kfence_pool = phys_to_virt(kfence_pool);
+			NO_BLOCK_MAPPINGS | NO_CONT_MAPPINGS | NO_EXEC_MAPPINGS);
+	memblock_clear_nomap(kfence_pool, kfence_pool_size);
+	__kfence_pool_early_init = phys_to_virt(kfence_pool);
 }
 #else /* CONFIG_KFENCE */
 
@@ -584,7 +649,7 @@ static void __init map_mem(pgd_t *pgdp)
 
 	early_kfence_pool = arm64_kfence_alloc_pool();
 
-	if (can_set_direct_map())
+	if (!can_set_block_and_cont_map())
 		flags |= NO_BLOCK_MAPPINGS | NO_CONT_MAPPINGS;
 
 	/*
@@ -854,12 +919,12 @@ static void unmap_hotplug_pte_range(pmd_t *pmdp, unsigned long addr,
 
 	do {
 		ptep = pte_offset_kernel(pmdp, addr);
-		pte = READ_ONCE(*ptep);
+		pte = __ptep_get(ptep);
 		if (pte_none(pte))
 			continue;
 
 		WARN_ON(!pte_present(pte));
-		pte_clear(&init_mm, addr, ptep);
+		__pte_clear(&init_mm, addr, ptep);
 		flush_tlb_kernel_range(addr, addr + PAGE_SIZE);
 		if (free_mapped)
 			free_hotplug_page_range(pte_page(pte),
@@ -987,7 +1052,7 @@ static void free_empty_pte_table(pmd_t *pmdp, unsigned long addr,
 
 	do {
 		ptep = pte_offset_kernel(pmdp, addr);
-		pte = READ_ONCE(*ptep);
+		pte = __ptep_get(ptep);
 
 		/*
 		 * This is just a sanity check here which verifies that
@@ -1006,7 +1071,7 @@ static void free_empty_pte_table(pmd_t *pmdp, unsigned long addr,
 	 */
 	ptep = pte_offset_kernel(pmdp, 0UL);
 	for (i = 0; i < PTRS_PER_PTE; i++) {
-		if (!pte_none(READ_ONCE(ptep[i])))
+		if (!pte_none(__ptep_get(&ptep[i])))
 			return;
 	}
 
@@ -1310,7 +1375,7 @@ int arch_add_memory(int nid, u64 start, u64 size,
 
 	VM_BUG_ON(!mhp_range_allowed(start, size, true));
 
-	if (can_set_direct_map())
+	if (!can_set_block_and_cont_map())
 		flags |= NO_BLOCK_MAPPINGS | NO_CONT_MAPPINGS;
 
 	__create_pgd_mapping(swapper_pg_dir, start, __phys_to_virt(start),
@@ -1476,7 +1541,7 @@ pte_t ptep_modify_prot_start(struct vm_area_struct *vma, unsigned long addr, pte
 		 * when the permission changes from executable to non-executable
 		 * in cases where cpu is affected with errata #2645198.
 		 */
-		if (pte_user_exec(READ_ONCE(*ptep)))
+		if (pte_user_exec(ptep_get(ptep)))
 			return ptep_clear_flush(vma, addr, ptep);
 	}
 	return ptep_get_and_clear(vma->vm_mm, addr, ptep);
@@ -1486,4 +1551,329 @@ void ptep_modify_prot_commit(struct vm_area_struct *vma, unsigned long addr, pte
 			     pte_t old_pte, pte_t pte)
 {
 	set_pte_at(vma->vm_mm, addr, ptep, pte);
+}
+
+static void clear_cont_pte_mapping(pmd_t *pmdp, unsigned long addr,
+				   unsigned long end)
+{
+	pte_t *ptep, *sptep, pte;
+	unsigned long saddr, next;
+	int i;
+
+	/*
+	 * Clear the CONT flag of ptes at the input range. CONT flag should be
+	 * cleared at the granularity of CONT_PTE.
+	 */
+	addr &= CONT_PTE_MASK;
+	if (end & ~CONT_PTE_MASK)
+		end = (end + CONT_PTE_SIZE) & CONT_PTE_MASK;
+
+	do {
+		pgprot_t prot;
+		unsigned long pfn;
+
+		saddr = addr;
+		next = pte_cont_addr_end(addr, end);
+		ptep = pte_offset_kernel(pmdp, addr);
+		pte = READ_ONCE(*ptep);
+
+		if (pte_none(pte))
+			continue;
+
+		if (pte_cont(READ_ONCE(*ptep))) {
+			sptep = ptep;
+			prot = pte_pgprot(pte_mknoncont(pte));
+			pfn = pte_pfn(pte);
+
+			/*
+			 * Changing the bit of contiguous entries requires to
+			 * follow Break-Before-Make approach. See ARM DDI
+			 * 0487A.k_iss10775, "Misprogramming of the Contiguous bit",
+			 * page D4-1762.
+			 */
+			for (i = 0; i < CONT_PTES; i++, ptep++)
+				pte_clear(&init_mm, addr, ptep);
+
+			for (i = 0; i < CONT_PTES; i++, saddr += PAGE_SIZE)
+				__flush_tlb_kernel_pgtable_entry(saddr);
+
+			for (i = 0; i < CONT_PTES; i++, sptep++, pfn++)
+				set_pte(sptep, pfn_pte(pfn, prot));
+		}
+	} while (addr = next, addr < end);
+}
+
+static void clear_cont_pmd_mapping(pud_t *pudp, unsigned long addr,
+				   unsigned long end)
+{
+	pmd_t *pmdp, *spmdp, pmd;
+	unsigned long saddr, next;
+	int i;
+
+	addr &= CONT_PMD_MASK;
+	if (end & ~CONT_PMD_MASK)
+		end = (end + CONT_PMD_SIZE) & CONT_PMD_MASK;
+
+	do {
+		pgprot_t prot;
+		unsigned long pfn, pfn_offset = PMD_SIZE >> PAGE_SHIFT;
+
+		saddr = addr;
+		next = pmd_cont_addr_end(addr, end);
+		pmdp = pmd_offset(pudp, addr);
+		pmd = READ_ONCE(*pmdp);
+
+		if (pmd_none(pmd))
+			continue;
+
+		WARN_ON(!pmd_present(pmd));
+
+		if (pte_cont(pmd_pte(pmd))) {
+			spmdp = pmdp;
+			prot = pte_pgprot(pmd_pte(pmd_mknoncont(pmd)));
+			pfn = pmd_pfn(pmd);
+
+			for (i = 0; i < CONT_PMDS; i++, pmdp++)
+				pmd_clear(pmdp);
+
+			for (i = 0; i < CONT_PMDS; i++, saddr += PMD_SIZE)
+				__flush_tlb_kernel_pgtable_entry(saddr);
+
+			for (i = 0; i < CONT_PMDS; i++, spmdp++, pfn += pfn_offset)
+				set_pmd(spmdp, pfn_pmd(pfn, prot));
+		}
+	} while (addr = next, addr < end);
+}
+
+static void split_pmd_mapping(pud_t *pudp, unsigned long addr, unsigned long end,
+			      pgprot_t prot, int flags)
+{
+	pmd_t *pmdp, pmd, split_pmd;
+	unsigned long next;
+	int new_flags = 0;
+
+	/*
+	 * Clear the contiguous pmd if there is any splitting request located in
+	 * the corresponding range.
+	 */
+	if (flags & NO_CONT_MAPPINGS)
+		clear_cont_pmd_mapping(pudp, addr, end);
+
+	do {
+		next = pmd_addr_end(addr, end);
+		pmdp = pmd_offset(pudp, addr);
+		pmd = READ_ONCE(*pmdp);
+
+		if (pmd_none(pmd))
+			continue;
+
+		WARN_ON(!pmd_present(pmd));
+
+		if (!pmd_exec(pmd))
+			flags |= NO_EXEC_MAPPINGS;
+
+		if (pmd_sect(pmd)) {
+			phys_addr_t phys, pte_phys;
+			pgprot_t orig_prot;
+
+			phys = __virt_to_phys(addr);
+
+			/*
+			 * Get the original protections except PMD_SECT.
+			 */
+			orig_prot = __pgprot(pgprot_val(pte_pgprot(pmd_pte(pmd))) |
+					     PMD_TYPE_TABLE);
+
+			/*
+			 * Allocate a new pmd page to re-initialize
+			 * corresponding ptes.
+			 */
+			pte_phys = pgd_pgtable_alloc(PAGE_SHIFT);
+			split_pmd = pfn_pmd(__phys_to_pfn(pte_phys), orig_prot);
+
+			/*
+			 * If addr/next is not PMD aligned, create contiguous
+			 * mapping at the rest of specific split range.
+			 */
+			if (addr & ~PMD_MASK)
+				alloc_init_cont_pte(&split_pmd, addr & PMD_MASK, addr,
+						    phys & PMD_MASK, prot,
+						    pgd_pgtable_alloc, new_flags);
+			if (next & ~PMD_MASK)
+				alloc_init_cont_pte(&split_pmd, next,
+						    (next + PMD_SIZE) & PMD_MASK,
+						    phys + next - addr, prot,
+						    pgd_pgtable_alloc, new_flags);
+
+			alloc_init_cont_pte(&split_pmd, addr, next, phys, prot,
+					    pgd_pgtable_alloc, flags);
+
+			/*
+			 * Obey the break-before-make rule to split the page
+			 * table, otherwise it might trigger CONSTRAINED
+			 * UNPREDICTABLE behaviors because TLB conflict. Thus
+			 * clear the original pmd entry and flush it, then set
+			 * the newly allocated pmd page.
+			 */
+			pmd_clear(pmdp);
+			__flush_tlb_kernel_pgtable_entry(addr);
+			set_pmd(pmdp, split_pmd);
+		} else {
+			clear_cont_pte_mapping(pmdp, addr, next);
+		}
+	} while (addr = next, addr < end);
+}
+
+static void split_pud_mapping(p4d_t *p4dp, unsigned long addr, unsigned long end,
+			      pgprot_t prot, int flags)
+{
+	pud_t *pudp, pud, split_pud;
+	unsigned long next;
+	int new_flags = 0;
+
+	do {
+		next = pud_addr_end(addr, end);
+		pudp = pud_offset(p4dp, addr);
+		pud = READ_ONCE(*pudp);
+
+		if (pud_none(pud))
+			continue;
+
+		WARN_ON(!pud_present(pud));
+
+		if (!pud_exec(pud))
+			flags |= NO_EXEC_MAPPINGS;
+
+		if (pud_sect(pud)) {
+			phys_addr_t phys, pmd_phys;
+			pgprot_t orig_prot;
+
+			phys = __virt_to_phys(addr);
+
+			orig_prot = __pgprot(pgprot_val(pte_pgprot(pud_pte(pud))) |
+							PUD_TYPE_TABLE);
+
+			pmd_phys = pgd_pgtable_alloc(PMD_SHIFT);
+			split_pud = pfn_pud(__phys_to_pfn(pmd_phys), orig_prot);
+
+			/*
+			 * If addr/next is not PUD aligned, create block and
+			 * contiguous mapping at the rest of specific split range.
+			 */
+			if (addr & ~PUD_MASK)
+				alloc_init_cont_pmd(&split_pud, addr & PUD_MASK,
+						    addr, phys & PUD_MASK,
+						    prot, pgd_pgtable_alloc, new_flags);
+			if (next & ~PUD_MASK)
+				alloc_init_cont_pmd(&split_pud, next,
+						    (next + PUD_SIZE) & PUD_MASK,
+						    phys + next - addr,
+						    prot, pgd_pgtable_alloc, new_flags);
+
+			alloc_init_cont_pmd(&split_pud, addr, next, phys, prot,
+					    pgd_pgtable_alloc, flags);
+
+			/*
+			 * Obey the break-before-make rule to split the page
+			 * table, otherwise it might trigger CONSTRAINED
+			 * UNPREDICTABLE behaviors because TLB conflict. Thus
+			 * clear the original pud entry and flush it, then set
+			 * the newly allocated pud page.
+			 */
+			pud_clear(pudp);
+			__flush_tlb_kernel_pgtable_entry(addr);
+			set_pud(pudp, split_pud);
+		} else {
+			split_pmd_mapping(pudp, addr, next, prot, flags);
+		}
+	} while (addr = next, addr < end);
+}
+
+static void split_p4d_mapping(pgd_t *pgdp, unsigned long addr, unsigned long end,
+			      pgprot_t prot, int flags)
+{
+	p4d_t *p4dp, p4d;
+	unsigned long next;
+
+	do {
+		next = p4d_addr_end(addr, end);
+		p4dp = p4d_offset(pgdp, addr);
+		p4d = READ_ONCE(*p4dp);
+
+		if (p4d_none(p4d))
+			continue;
+
+		WARN_ON(!p4d_present(p4d));
+
+#if CONFIG_PGTABLE_LEVELS > 3
+		/*
+		 * If the original p4d mapping is not executable, remain it even
+		 * splitting.
+		 */
+		if (!p4d_exec(p4d))
+			flags |= NO_EXEC_MAPPINGS;
+#endif
+
+		split_pud_mapping(p4dp, addr, next, prot, flags);
+	} while (addr = next, addr < end);
+}
+
+void split_linear_mapping(unsigned long virt, phys_addr_t size, pgprot_t prot)
+{
+	pgd_t *pgdp, pgd;
+	unsigned long addr, next, end;
+	int flags = NO_BLOCK_MAPPINGS | NO_CONT_MAPPINGS;
+
+	addr = virt & PAGE_MASK;
+	end = PAGE_ALIGN(virt + size);
+	prot = pgprot_tagged(prot);
+
+	do {
+		next = pgd_addr_end(addr, end);
+		pgdp = pgd_offset_k(addr);
+		pgd = READ_ONCE(*pgdp);
+
+		if (pgd_none(pgd))
+			continue;
+
+		WARN_ON(!pgd_present(pgd));
+
+		split_p4d_mapping(pgdp, addr, next, prot, flags);
+	} while (addr = next, addr < end);
+}
+
+static int __split_linear_mapping_after_init(void *data)
+{
+	struct split_memory_params *param = data;
+
+	if (atomic_inc_return(&param->cpu_count) == 1) {
+		split_linear_mapping(param->virt, param->size, param->prot);
+		atomic_inc(&param->cpu_count);
+	} else {
+		while (atomic_read(&param->cpu_count) <= num_online_cpus())
+			cpu_relax();
+	}
+	return 0;
+}
+
+/*
+ * When splitting the kernel page table through the Break-Before-Make principle,
+ * other CPUs might access address that mapped by a cleared entry before
+ * remapping. Thus the stop machine is used to avoid kernel page fault
+ * caused by inter-CPU synchronization.
+ */
+void split_linear_mapping_after_init(unsigned long virt, phys_addr_t size,
+				    pgprot_t prot)
+
+{
+	mutex_lock(&split_linear_mapping_lock);
+
+	split_memory_param.virt = virt;
+	split_memory_param.size = size;
+	split_memory_param.prot = prot;
+	atomic_set(&split_memory_param.cpu_count, 0);
+
+	stop_machine(__split_linear_mapping_after_init, &split_memory_param, cpu_online_mask);
+
+	mutex_unlock(&split_linear_mapping_lock);
 }

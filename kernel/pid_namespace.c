@@ -25,6 +25,11 @@
 #include <linux/idr.h>
 #include "pid_sysctl.h"
 
+#ifdef CONFIG_RICH_CONTAINER
+int sysctl_rich_container_enable;
+int sysctl_rich_container_source; /* 0 - current; 1 - child_reaper */
+#endif
+
 static DEFINE_MUTEX(pid_caches_mutex);
 static struct kmem_cache *pid_ns_cachep;
 /* Write once array, filled from the beginning. */

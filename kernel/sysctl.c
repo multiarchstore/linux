@@ -63,6 +63,7 @@
 #include <linux/mount.h>
 #include <linux/userfaultfd_k.h>
 #include <linux/pid.h>
+#include <linux/pid_namespace.h>
 
 #include "../lib/kstrtox.h"
 
@@ -96,6 +97,11 @@ EXPORT_SYMBOL_GPL(sysctl_long_vals);
 static const int six_hundred_forty_kb = 640 * 1024;
 #endif
 
+#ifdef CONFIG_USER_NS
+extern int unprivileged_userns_clone;
+extern int userns_max_level;
+extern int userns_max_level_max;
+#endif
 
 static const int ngroups_max = NGROUPS_MAX;
 static const int cap_last_cap = CAP_LAST_CAP;
@@ -129,6 +135,8 @@ enum sysctl_writes_mode {
 
 static enum sysctl_writes_mode sysctl_writes_strict = SYSCTL_WRITES_STRICT;
 #endif /* CONFIG_PROC_SYSCTL */
+
+extern int sysctl_enable_context_readahead;
 
 #if defined(HAVE_ARCH_PICK_MMAP_LAYOUT) || \
     defined(CONFIG_ARCH_WANT_DEFAULT_TOPDOWN_MMAP_LAYOUT)
@@ -2043,6 +2051,72 @@ static struct ctl_table kern_table[] = {
 		.extra2		= SYSCTL_INT_MAX,
 	},
 #endif
+#ifdef CONFIG_USER_NS
+	{
+		.procname	= "unprivileged_userns_clone",
+		.data		= &unprivileged_userns_clone,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "userns_max_level",
+		.data		= &userns_max_level,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= &userns_max_level_max,
+	},
+#endif
+#ifdef CONFIG_SCHED_ACPU
+	{
+		.procname	= "sched_acpu",
+		.data		= &sysctl_sched_acpu_enabled,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= sched_acpu_enable_handler,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+#endif /* CONFIG_SCHED_ACPU*/
+#ifdef CONFIG_RICH_CONTAINER
+	{
+		.procname	= "rich_container_enable",
+		.data		= &sysctl_rich_container_enable,
+		.maxlen		= sizeof(int),
+		.mode		= 0600,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "rich_container_source",
+		.data		= &sysctl_rich_container_source,
+		.maxlen		= sizeof(int),
+		.mode		= 0600,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname       = "rich_container_cpuinfo_source",
+		.data           = &sysctl_rich_container_cpuinfo_source,
+		.maxlen         = sizeof(int),
+		.mode           = 0600,
+		.proc_handler   = proc_dointvec_minmax,
+		.extra1         = SYSCTL_ZERO,
+		.extra2         = SYSCTL_TWO,
+	},
+	{
+		.procname       = "rich_container_cpuinfo_sharesbase",
+		.data           = &sysctl_rich_container_cpuinfo_sharesbase,
+		.maxlen         = sizeof(int),
+		.mode           = 0600,
+		.proc_handler   = proc_douintvec_minmax,
+		.extra1         = SYSCTL_TWO,
+	},
+#endif
 	{ }
 };
 
@@ -2249,6 +2323,15 @@ static struct ctl_table vm_table[] = {
 		.extra2		= (void *)&mmap_rnd_compat_bits_max,
 	},
 #endif
+	{
+		.procname       = "enable_context_readahead",
+		.data           = &sysctl_enable_context_readahead,
+		.maxlen         = sizeof(sysctl_enable_context_readahead),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
 	{ }
 };
 

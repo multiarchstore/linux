@@ -237,38 +237,46 @@ out:
 #ifdef CONFIG_SCHEDSTATS
 
 /* REQUIRES: rq->core's clock recently updated. */
-void __sched_core_account_forceidle(struct rq *rq)
+void __sched_core_account_sibidle(struct rq *rq)
 {
 	const struct cpumask *smt_mask = cpu_smt_mask(cpu_of(rq));
 	u64 delta, now = rq_clock(rq->core);
+	u64 delta_task, now_task = rq_clock_task(rq->core);
 	struct rq *rq_i;
 	struct task_struct *p;
 	int i;
 
 	lockdep_assert_rq_held(rq);
 
-	WARN_ON_ONCE(!rq->core->core_forceidle_count);
+	WARN_ON_ONCE(!rq->core->core_sibidle_count);
 
-	if (rq->core->core_forceidle_start == 0)
-		return;
+	/* can't be forced idle without a running task */
+	WARN_ON_ONCE(!rq->core->core_sibidle_occupation &&
+		     rq->core->core_forceidle_count);
 
-	delta = now - rq->core->core_forceidle_start;
+	if (rq->core->core_sibidle_start == 0 ||
+	    rq->core->core_sibidle_occupation == 0)
+		goto out;
+
+	delta = now - rq->core->core_sibidle_start;
+	delta_task = now_task - rq->core->core_sibidle_start_task;
 	if (unlikely((s64)delta <= 0))
-		return;
+		goto out;
 
-	rq->core->core_forceidle_start = now;
+	rq->core->core_sibidle_start = now;
+	rq->core->core_sibidle_start_task = now_task;
 
-	if (WARN_ON_ONCE(!rq->core->core_forceidle_occupation)) {
-		/* can't be forced idle without a running task */
-	} else if (rq->core->core_forceidle_count > 1 ||
-		   rq->core->core_forceidle_occupation > 1) {
+	if (rq->core->core_sibidle_count > 1 ||
+	    rq->core->core_sibidle_occupation > 1) {
 		/*
 		 * For larger SMT configurations, we need to scale the charged
 		 * forced idle amount since there can be more than one forced
 		 * idle sibling and more than one running cookied task.
 		 */
-		delta *= rq->core->core_forceidle_count;
-		delta = div_u64(delta, rq->core->core_forceidle_occupation);
+		delta *= rq->core->core_sibidle_count;
+		delta = div_u64(delta, rq->core->core_sibidle_occupation);
+		delta_task *= rq->core->core_sibidle_count;
+		delta_task = div_u64(delta_task, rq->core->core_sibidle_occupation);
 	}
 
 	for_each_cpu(i, smt_mask) {
@@ -279,22 +287,32 @@ void __sched_core_account_forceidle(struct rq *rq)
 			continue;
 
 		/*
-		 * Note: this will account forceidle to the current cpu, even
+		 * Note: this will account sibidle to the current cpu, even
 		 * if it comes from our SMT sibling.
 		 */
-		__account_forceidle_time(p, delta);
+		__account_sibidle_time(p, delta, delta_task,
+				       !!rq->core->core_forceidle_count);
+		account_ht_aware_quota(p, delta_task);
 	}
+
+out:;
+#ifdef CONFIG_SCHED_ACPU
+	for_each_cpu(i, smt_mask) {
+		rq_i = cpu_rq(i);
+		rq->last_acpu_update_time = now;
+	}
+#endif
 }
 
 void __sched_core_tick(struct rq *rq)
 {
-	if (!rq->core->core_forceidle_count)
+	if (!rq->core->core_sibidle_count)
 		return;
 
 	if (rq != rq->core)
 		update_rq_clock(rq->core);
 
-	__sched_core_account_forceidle(rq);
+	__sched_core_account_sibidle(rq);
 }
 
 #endif /* CONFIG_SCHEDSTATS */

@@ -279,6 +279,8 @@ struct kvm_arch {
 	 * the associated pKVM instance in the hypervisor.
 	 */
 	struct kvm_protected_vm pkvm;
+
+	CK_KABI_RESERVE(1)
 };
 
 struct kvm_vcpu_fault_info {
