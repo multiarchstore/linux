@@ -22,7 +22,7 @@
  * range of the LPC Controller is 64K, starting
  * from 0x1800,0000 to 0x1800,ffff
  */
-static void pci_fixup_loongson_lpc_io()
+static void pci_fixup_loongson_lpc_io(void)
 {
 	dev_info("LPC: Remapping LPC IO range to 0x18000000-0x1800ffff\n");
 	unsigned long vaddr;
