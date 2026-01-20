@@ -22,14 +22,21 @@
  * range of the LPC Controller is 64K, starting
  * from 0x1800,0000 to 0x1800,ffff
  */
-static void pci_fixup_loongson_lpc_io(struct pci_dev *dev)
+static void pci_fixup_loongson_lpc_io()
 {
-	dev_info(&dev->dev, "Remapping LPC IO range to 0x18000000-0x1800ffff\n");
+	dev_info("LPC: Remapping LPC IO range to 0x18000000-0x1800ffff\n");
 	unsigned long vaddr;
 	struct logic_pio_hwaddr *range;
 	struct fwnode_handle *fwnode;
 	resource_size_t size;
 	resource_size_t hw_start;
+	struct pci_dev *dev;
+    
+    dev = pci_get_device(PCI_VENDOR_ID_LOONGSON, 0x7a0c, NULL);
+	if (!dev) {
+		dev_info("No LPC device found!\n");
+		return;
+	}
 
 	fwnode = acpi_alloc_fwnode_static();
 	hw_start = LOONGSON_LIO_BASE;
@@ -63,4 +70,4 @@ static void pci_fixup_loongson_lpc_io(struct pci_dev *dev)
 	vaddr = (unsigned long)(PCI_IOBASE + range->io_start);
 	vmap_page_range(vaddr, vaddr + size, hw_start, pgprot_device(PAGE_KERNEL));	
 }
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_LOONGSON, 0x7a0c, pci_fixup_loongson_lpc_io);
+arch_initcall(pci_fixup_loongson_lpc_io);
