@@ -3,47 +3,64 @@
  * Exceptions for specific devices. Usually work-arounds for fatal design flaws.
  */
 
-#include <linux/bitfield.h>
-#include <linux/delay.h>
-#include <linux/dmi.h>
 #include <linux/pci.h>
-#include <linux/ioport.h>
-#include <linux/suspend.h>
-#include <linux/vgaarb.h>
+#include <linux/logic_pio.h>
+#include <linux/acpi.h>
+#include <linux/slab.h>
+#include <linux/device.h>
+#include <linux/kernel.h>
+#include <linux/sizes.h>
+#include <linux/mm.h>
 
 #include <asm/loongson.h>
+#include <asm/io.h>
 
-static void pci_fixup_loongson_LPC(struct pci_dev *dev)
+/*
+ * Find and fixup IO address for LPC Controller
+ * According to the 2K2000 / 7A1000/2000 Chipset 
+ * LPC Controller Specification, the IO address 
+ * range of the LPC Controller is 64K, starting
+ * from 0x1800,0000 to 0x1800,ffff
+ */
+static void pci_fixup_loongson_lpc_io(struct pci_dev *dev)
 {
-	/*
-	 * 2K2000 / 7A1000/2000 Chipset LPC Controller
-	 * Find and fixup IO address for LPC Controller
-	 */
-	 int i;
-	 struct resource *res;
-	 resource_size_t size, start, stop;
-	 for (i = 0; i < PCI_NUM_RESOURCES; ++i) {
-		res = pci_resource_n(dev, i);
-		size = pci_resource_len(dev, i);
-		start = LOONGSON_LIO_BASE;
-		stop = LOONGSON_LIO_BASE + size - 1;
+	dev_info(&dev->dev, "Remapping LPC IO range to 0x18000000-0x1800ffff\n");
+	unsigned long vaddr;
+	struct logic_pio_hwaddr *range;
+	struct fwnode_handle *fwnode;
+	resource_size_t size;
+	resource_size_t hw_start;
 
-		if(!pci_release_resource(dev, i)) {
-			pr_warn("Failed to adjust resource %d:", i);
-			continue;
-		}
+	fwnode = acpi_alloc_fwnode_static();
+	hw_start = LOONGSON_LIO_BASE;
+	size = SZ_64K;
 
-		if(!adjust_resource(res, start, stop)) {
-			pr_warn("Failed to adjust resource for %d\n", i);
-			continue;
-		}
+	range = kzalloc(sizeof(*range), GFP_ATOMIC);
+	if (!range) {
+		acpi_free_fwnode_static(fwnode);
+		return;
+	}
 
-		if(!pci_claim_resource(dev, i)) {
-			pr_err("Failed to claim resource %d\n", i);
-			continue;
-		}
+	range->fwnode = fwnode;
+	range->size = size = round_up(size, PAGE_SIZE);
+	range->hw_start = hw_start;
+	range->flags = LOGIC_PIO_CPU_MMIO;
 
-		pci_update_resource(dev, i);
-	 }
+	if (logic_pio_register_range(range)) {
+		kfree(range);
+		acpi_free_fwnode_static(fwnode);
+		return;
+	}
+
+	/* Legacy ISA must placed at the start of PCI_IOBASE */
+	if (range->io_start != 0) {
+		logic_pio_unregister_range(range);
+		kfree(range);
+		acpi_free_fwnode_static(fwnode);
+		return;
+	}
+
+	vaddr = (unsigned long)(PCI_IOBASE + range->io_start);
+	vmap_page_range(vaddr, vaddr + size, hw_start, pgprot_device(PAGE_KERNEL));	
 }
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_LOONGSON, 0x7a0c, pci_fixup_loongson_LPC);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_LOONGSON, 0x7a0c, pci_fixup_loongson_lpc_io);
