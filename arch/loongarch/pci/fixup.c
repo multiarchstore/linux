@@ -22,7 +22,7 @@
  * range of the LPC Controller is 64K, starting
  * from 0x1800,0000 to 0x1800,ffff
  */
-static void pci_fixup_loongson_lpc_io(void)
+static __init int pci_fixup_loongson_lpc_io(void)
 {
 	dev_info("LPC: Remapping LPC IO range to 0x18000000-0x1800ffff\n");
 	unsigned long vaddr;
@@ -35,7 +35,7 @@ static void pci_fixup_loongson_lpc_io(void)
     dev = pci_get_device(PCI_VENDOR_ID_LOONGSON, 0x7a0c, NULL);
 	if (!dev) {
 		dev_info("No LPC device found!\n");
-		return;
+		return 0;
 	}
 
 	fwnode = acpi_alloc_fwnode_static();
@@ -45,7 +45,7 @@ static void pci_fixup_loongson_lpc_io(void)
 	range = kzalloc(sizeof(*range), GFP_ATOMIC);
 	if (!range) {
 		acpi_free_fwnode_static(fwnode);
-		return;
+		return 0;
 	}
 
 	range->fwnode = fwnode;
@@ -56,7 +56,7 @@ static void pci_fixup_loongson_lpc_io(void)
 	if (logic_pio_register_range(range)) {
 		kfree(range);
 		acpi_free_fwnode_static(fwnode);
-		return;
+		return 0;
 	}
 
 	/* Legacy ISA must placed at the start of PCI_IOBASE */
@@ -64,10 +64,11 @@ static void pci_fixup_loongson_lpc_io(void)
 		logic_pio_unregister_range(range);
 		kfree(range);
 		acpi_free_fwnode_static(fwnode);
-		return;
+		return 0;
 	}
 
 	vaddr = (unsigned long)(PCI_IOBASE + range->io_start);
 	vmap_page_range(vaddr, vaddr + size, hw_start, pgprot_device(PAGE_KERNEL));	
+	return 0;
 }
 arch_initcall(pci_fixup_loongson_lpc_io);
