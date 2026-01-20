@@ -24,19 +24,23 @@
  */
 static __init int pci_fixup_loongson_lpc_io(void)
 {
-	pr_info("LPC: Remapping LPC IO range to 0x18000000-0x1800ffff\n");
 	unsigned long vaddr;
 	struct logic_pio_hwaddr *range;
 	struct fwnode_handle *fwnode;
 	resource_size_t size;
 	resource_size_t hw_start;
 	struct pci_dev *dev;
+
+	if (acpi_disabled)
+		return 0;
     
     dev = pci_get_device(PCI_VENDOR_ID_LOONGSON, 0x7a0c, NULL);
 	if (!dev) {
 		pr_info("No LPC device found!\n");
 		return 0;
 	}
+	
+	pr_info("LPC: Remapping LPC IO range to 0x18000000-0x1800ffff\n");
 
 	fwnode = acpi_alloc_fwnode_static();
 	hw_start = LOONGSON_LIO_BASE;
