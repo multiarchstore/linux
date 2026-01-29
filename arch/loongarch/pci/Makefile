@@ -5,3 +5,5 @@
 
 obj-y				+= pci.o
 obj-$(CONFIG_ACPI)		+= acpi.o
+
+obj-y				+= fixup.o
